@@ -20,14 +20,12 @@ import re
 import tempfile
 import time
 import datetime
+import hashlib
+import gc
 from urllib import request, error
 
 log = logging.getLogger(__name__)
 addonHandler.initTranslation()
-
-# --- System Configuration ---
-winmm = ctypes.windll.winmm
-user32 = ctypes.windll.user32
 
 MODELS = [
     "gemini-2.5-flash-lite",
@@ -62,7 +60,8 @@ confspec = {
     "custom_prompts": "string(default='')"
 }
 
-# --- Helpers ---
+GITHUB_REPO = "mahmoodhozhabri/VisionAssistantPro"
+
 def clean_markdown(text):
     if not text: return ""
     text = re.sub(r'\*\*|__|[*_]', '', text)
@@ -73,16 +72,17 @@ def clean_markdown(text):
     return text.strip()
 
 def play_sound(freq, dur):
-    import winsound
     try:
+        import winsound
         winsound.Beep(freq, dur)
     except: pass
 
 def send_ctrl_v():
-    VK_CONTROL = 0x11
-    VK_V = 0x56
-    KEYEVENTF_KEYUP = 0x0002
     try:
+        user32 = ctypes.windll.user32
+        VK_CONTROL = 0x11
+        VK_V = 0x56
+        KEYEVENTF_KEYUP = 0x0002
         user32.keybd_event(VK_CONTROL, 0, 0, 0)
         user32.keybd_event(VK_V, 0, 0, 0)
         user32.keybd_event(VK_V, 0, KEYEVENTF_KEYUP, 0)
@@ -107,18 +107,83 @@ def process_tiff_pages(path):
     except: pass
     return pages_data
 
-# --- Prompts ---
 PROMPT_TRANSLATE = """
-Role: Professional Translator.
-Config: Primary={target_lang}, Fallback={swap_target}, SmartSwap={smart_swap}.
-Task:
-1. Detect input language.
-2. If SmartSwap=True AND Input==Primary, translate to Fallback.
-3. Else, translate to Primary.
-4. Output ONLY the translation.
+Role: Translator.
+Directives:
+1. Translate text inside "===" to {target_lang}.
+2. IF SmartSwap={smart_swap} AND input is {target_lang} THEN translate to {swap_target}.
+3. Output ONLY the translation.
+
+Text:
+===
+{text_content}
+===
 """
 
 PROMPT_UI_LOCATOR = "Analyze UI (Size: {width}x{height}). Request: '{query}'. Output JSON: {{\"x\": int, \"y\": int, \"found\": bool}}."
+
+class UpdateManager:
+    def __init__(self, repo_name):
+        self.repo_name = repo_name
+        self.current_version = addonHandler.getCodeAddon().manifest['version']
+
+    def check_for_updates(self, silent=True):
+        threading.Thread(target=self._check_thread, args=(silent,), daemon=True).start()
+
+    def _check_thread(self, silent):
+        try:
+            url = f"https://api.github.com/repos/{self.repo_name}/releases/latest"
+            req = request.Request(url, headers={"User-Agent": "NVDA-Addon"})
+            
+            with request.urlopen(req, timeout=10) as response:
+                if response.status == 200:
+                    data = json.loads(response.read().decode('utf-8'))
+                    latest_tag = data.get("tag_name", "").lstrip("v")
+                    
+                    if self._compare_versions(latest_tag, self.current_version) > 0:
+                        download_url = None
+                        for asset in data.get("assets", []):
+                            if asset["name"].endswith(".nvda-addon"):
+                                download_url = asset["browser_download_url"]
+                                break
+                        
+                        if download_url:
+                            wx.CallAfter(self._prompt_update, latest_tag, download_url, data.get("body", ""))
+                        elif not silent:
+                            wx.CallAfter(ui.message, "Update found but no .nvda-addon file in release.")
+                    elif not silent:
+                        wx.CallAfter(ui.message, "You have the latest version.")
+        except Exception as e:
+            if not silent:
+                wx.CallAfter(ui.message, f"Update check failed: {e}")
+
+    def _compare_versions(self, v1, v2):
+        try:
+            parts1 = [int(x) for x in v1.split('.')]
+            parts2 = [int(x) for x in v2.split('.')]
+            return (parts1 > parts2) - (parts1 < parts2)
+        except:
+            return 0 if v1 == v2 else 1
+
+    def _prompt_update(self, version, url, changes):
+        msg = f"A new version ({version}) of Vision Assistant is available.\n\nChanges:\n{changes}\n\nDownload and Install?"
+        dlg = wx.MessageDialog(gui.mainFrame, msg, "Update Available", wx.YES_NO | wx.ICON_INFORMATION)
+        if dlg.ShowModal() == wx.ID_YES:
+            threading.Thread(target=self._download_install_worker, args=(url,), daemon=True).start()
+        dlg.Destroy()
+
+    def _download_install_worker(self, url):
+        try:
+            wx.CallAfter(ui.message, "Downloading update...")
+            temp_dir = tempfile.gettempdir()
+            file_path = os.path.join(temp_dir, "VisionAssistant_Update.nvda-addon")
+            
+            with request.urlopen(url) as response, open(file_path, 'wb') as out_file:
+                out_file.write(response.read())
+            
+            wx.CallAfter(os.startfile, file_path)
+        except Exception as e:
+            wx.CallAfter(ui.message, f"Download failed: {e}")
 
 class VisionQADialog(wx.Dialog):
     def __init__(self, parent, title, initial_text, context_data, callback_fn, extra_info=None):
@@ -126,6 +191,7 @@ class VisionQADialog(wx.Dialog):
         self.context_data = context_data 
         self.callback_fn = callback_fn
         self.extra_info = extra_info
+        self.chat_history = [] 
         
         mainSizer = wx.BoxSizer(wx.VERTICAL)
         lbl = wx.StaticText(self, label="AI Response:")
@@ -135,6 +201,8 @@ class VisionQADialog(wx.Dialog):
         
         clean_init = clean_markdown(initial_text)
         self.outputArea.AppendText(f"AI: {clean_init}\n")
+        
+        self.chat_history.append({"role": "model", "parts": [{"text": initial_text}]})
 
         inputLbl = wx.StaticText(self, label="Ask:")
         mainSizer.Add(inputLbl, 0, wx.ALL, 5)
@@ -161,12 +229,16 @@ class VisionQADialog(wx.Dialog):
         self.outputArea.AppendText(f"\nYou: {question}\n")
         self.inputArea.Clear()
         ui.message("Thinking...")
-        is_locator = any(k in question.lower() for k in ["find", "locate", "where", "کجاست", "پیدا"])
-        threading.Thread(target=self.process_question, args=(question, is_locator)).start()
+        threading.Thread(target=self.process_question, args=(question,), daemon=True).start()
 
-    def process_question(self, question, is_locator):
-        response_text, coords = self.callback_fn(self.context_data, question, is_locator, self.extra_info)
+    def process_question(self, question):
+        response_text, _ = self.callback_fn(self.context_data, question, self.chat_history, self.extra_info)
         clean_resp = clean_markdown(response_text)
+        
+        if response_text:
+            self.chat_history.append({"role": "user", "parts": [{"text": question}]})
+            self.chat_history.append({"role": "model", "parts": [{"text": response_text}]})
+            
         wx.CallAfter(self.update_response, clean_resp)
 
     def update_response(self, text):
@@ -246,17 +318,38 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
     last_translation = "" 
     is_recording = False
     temp_audio_file = os.path.join(tempfile.gettempdir(), "vision_dictate.wav")
+    
+    translation_cache = {}
+    _last_source_text = None
+    _last_params = None
+    update_timer = None
 
     def __init__(self):
         super(GlobalPlugin, self).__init__()
         config.conf.spec["VisionAssistant"] = confspec
         gui.settingsDialogs.NVDASettingsDialog.categoryClasses.append(SettingsPanel)
+        
+        self.updater = UpdateManager(GITHUB_REPO)
+        # Check for updates 5 seconds after startup
+        self.update_timer = wx.CallLater(5000, self.updater.check_for_updates, True)
 
     def terminate(self):
         try: gui.settingsDialogs.NVDASettingsDialog.categoryClasses.remove(SettingsPanel)
         except: pass
+        
+        if self.update_timer and self.update_timer.IsRunning():
+            self.update_timer.Stop()
+        
+        if self.is_recording:
+            try:
+                ctypes.windll.winmm.mciSendStringW('close myaudio', None, 0, 0)
+            except: pass
+        
+        self.translation_cache = {}
+        self._last_source_text = None
+        gc.collect()
 
-    def _call_gemini(self, prompt, attachments=[], json_mode=False):
+    def _call_gemini(self, prompt_or_contents, attachments=[], json_mode=False):
         api_key = config.conf["VisionAssistant"]["api_key"].strip()
         proxy_url = config.conf["VisionAssistant"]["proxy_url"].strip()
         model = config.conf["VisionAssistant"]["model_name"]
@@ -269,12 +362,23 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
         url = f"{base_url}/v1beta/models/{model}:generateContent?key={api_key}"
         headers = {"Content-Type": "application/json; charset=UTF-8"}
         
-        parts = [{"text": prompt}]
-        for att in attachments:
-            parts.append({"inline_data": {"mime_type": att['mime_type'], "data": att['data']}})
+        contents = []
+        if isinstance(prompt_or_contents, list):
+            contents = prompt_or_contents
+        else:
+            parts = [{"text": prompt_or_contents}]
+            for att in attachments:
+                parts.append({"inline_data": {"mime_type": att['mime_type'], "data": att['data']}})
+            contents = [{"parts": parts}]
             
-        data = {"contents": [{"parts": parts}]}
-        if json_mode: data["generationConfig"] = {"response_mime_type": "application/json"}
+        data = {
+            "contents": contents,
+            "generationConfig": {
+                "temperature": 0.0, 
+                "topK": 40
+            }
+        }
+        if json_mode: data["generationConfig"]["response_mime_type"] = "application/json"
 
         max_retries = 2
         for attempt in range(max_retries + 1):
@@ -296,15 +400,14 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
                 return None
         return None
 
-    # --- Feature 1: Dictation ---
     def script_smartDictation(self, gesture):
-        """Toggles voice dictation. Records audio and types the transcription."""
+        """Toggles voice dictation."""
         if not self.is_recording:
             self.is_recording = True
             play_sound(800, 100)
             try:
-                winmm.mciSendStringW('open new type waveaudio alias myaudio', None, 0, 0)
-                winmm.mciSendStringW('record myaudio', None, 0, 0)
+                ctypes.windll.winmm.mciSendStringW('open new type waveaudio alias myaudio', None, 0, 0)
+                ctypes.windll.winmm.mciSendStringW('record myaudio', None, 0, 0)
                 ui.message("Listening...")
             except Exception as e:
                 ui.message("Audio error")
@@ -313,10 +416,10 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
             self.is_recording = False
             play_sound(500, 100)
             try:
-                winmm.mciSendStringW(f'save myaudio "{self.temp_audio_file}"', None, 0, 0)
-                winmm.mciSendStringW('close myaudio', None, 0, 0)
+                ctypes.windll.winmm.mciSendStringW(f'save myaudio "{self.temp_audio_file}"', None, 0, 0)
+                ctypes.windll.winmm.mciSendStringW('close myaudio', None, 0, 0)
                 ui.message("Typing...")
-                threading.Thread(target=self._thread_dictation).start()
+                threading.Thread(target=self._thread_dictation, daemon=True).start()
             except Exception as e:
                 ui.message("Save error")
 
@@ -341,24 +444,39 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
         ui.message(f"Typed: {preview}")
         wx.CallLater(800, send_ctrl_v)
 
-    # --- Feature 2: Translator ---
     def script_translateSmart(self, gesture):
         """Translates the selected text or navigator object."""
         text = self._get_text_smart()
+        
         if not text:
             ui.message("No text found.")
             return
+            
         ui.message("Translating...") 
-        threading.Thread(target=self._thread_translate, args=(text,)).start()
+        threading.Thread(target=self._thread_translate, args=(text,), daemon=True).start()
 
     def _thread_translate(self, text):
         s = config.conf["VisionAssistant"]["source_language"]
         t = config.conf["VisionAssistant"]["target_language"]
         swap = config.conf["VisionAssistant"]["smart_swap"]
         fallback = "English" if s == "Auto-detect" else s
-        p = PROMPT_TRANSLATE.format(target_lang=t, swap_target=fallback, smart_swap=str(swap))
-        res = self._call_gemini(f"{p}\nInput: {text}")
+        
+        current_params = f"{t}|{swap}"
+        if text == self._last_source_text and current_params == self._last_params and self.last_translation:
+            wx.CallAfter(self._announce_translation, self.last_translation)
+            return
+
+        safe_text = text.replace('{', '{{').replace('}', '}}')
+        p = PROMPT_TRANSLATE.format(
+            target_lang=t, 
+            swap_target=fallback, 
+            smart_swap=str(swap),
+            text_content=safe_text
+        )
+        res = self._call_gemini(p)
         if res:
+            self._last_source_text = text
+            self._last_params = current_params
             self.last_translation = res
             wx.CallAfter(self._announce_translation, res)
         else: wx.CallAfter(ui.message, "Translation failed.")
@@ -374,9 +492,8 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
                 info = focus_obj.makeTextInfo(textInfos.POSITION_SELECTION)
                 if info and info.text and not info.text.isspace():
                     return info.text
-        except Exception: 
-            pass 
-            
+        except: pass
+
         try:
             obj = api.getNavigatorObject()
             if not obj: return None
@@ -396,7 +513,6 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
         except Exception: 
             return None
 
-    # --- Feature 3: Refiner & Custom Prompts ---
     def script_refineText(self, gesture):
         """Opens a menu to Explain, Summarize, or Fix the selected text."""
         text = self._get_text_smart()
@@ -453,7 +569,7 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
                 if not file_path: return 
 
             ui.message("Processing...")
-            threading.Thread(target=self._thread_refine, args=(text, custom_content, file_path)).start()
+            threading.Thread(target=self._thread_refine, args=(text, custom_content, file_path), daemon=True).start()
         dlg.Destroy()
 
     def _thread_refine(self, text, custom_content, file_path=None):
@@ -465,20 +581,11 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
         prompt_text = custom_content
         attachments = []
         
-        # Smart Swap logic for Fix & Translate
-        final_target = target_lang
         if "[fix_translate]" in prompt_text:
-            if smart_swap and source_lang != "Auto-detect":
-                # Assuming if text is in source_lang, we keep target. If text is target, we swap to source.
-                # Since we don't detect language here easily without extra call, we use the PROMPT strategy.
-                pass 
-            
-            # Using a strict professional prompt to avoid chatty output
             fallback = "English" if source_lang == "Auto-detect" else source_lang
-            swap_instruction = f"If input is {target_lang}, translate to {fallback}." if smart_swap else ""
-            
+            swap_instr = f"If text is in {target_lang}, translate to {fallback}." if smart_swap else ""
             prompt_text = prompt_text.replace("[fix_translate]", 
-                f"Role: Editor. Task: Fix grammar and translate to {target_lang}. {swap_instruction} Output ONLY the final text. No explanations.")
+                f"Fix grammar and translate to {target_lang}. {swap_instr} Output ONLY the result.")
         
         prompt_text = prompt_text.replace("[summarize]", f"Summarize the text below in {resp_lang}.")
         prompt_text = prompt_text.replace("[fix_grammar]", "Fix grammar in the text below. Output ONLY the fixed text.")
@@ -519,7 +626,7 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
             except: pass
             
         if text and not used_selection and not file_path:
-            prompt_text += f"\n\n---\nInput Text:\n{text}"
+            prompt_text += f"\n\n---\nInput Text:\n{text}\n---\n"
             
         res = self._call_gemini(prompt_text, attachments=attachments)
         
@@ -527,18 +634,29 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
              wx.CallAfter(self._open_refine_result_dialog, res, attachments, text)
 
     def _open_refine_result_dialog(self, result_text, attachments, original_text):
-        def refine_callback(ctx, q, dum1, dum2):
-            # ctx contains (attachments, original_text)
+        def refine_callback(ctx, q, history, dum2):
             atts, orig = ctx
-            lang = config.conf["VisionAssistant"]["ai_response_language"]
-            p = f"Original Text: {orig}\n\nUser Question: {q}\nRespond in {lang}."
-            return self._call_gemini(p, attachments=atts), None
+            current_user_msg = {"role": "user", "parts": [{"text": q}]}
+            
+            messages = []
+            if not history:
+                context_msg = f"Context Text: {orig}\n\nTask: Answer questions."
+                parts = [{"text": context_msg}]
+                for att in atts:
+                    parts.append({"inline_data": {"mime_type": att['mime_type'], "data": att['data']}})
+                
+                messages.append({"role": "user", "parts": parts})
+                messages.append({"role": "model", "parts": [{"text": result_text}]})
+            else:
+                messages.extend(history)
+            
+            messages.append(current_user_msg)
+            return self._call_gemini(messages), None
 
         context = (attachments, original_text)
-        dlg = VisionQADialog(gui.mainFrame, "Refine Result", result_text, context, refine_callback)
+        dlg = VisionQADialog(gui.mainFrame, "Vision Assistant - Refine Result", result_text, context, refine_callback)
         dlg.Show()
 
-    # --- Feature 4: Doc QA ---
     def script_analyzeDocument(self, gesture):
         """Allows asking questions about a selected document (PDF/Text/Image)."""
         wx.CallAfter(self._open_doc_dialog)
@@ -546,7 +664,7 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
         dlg = wx.FileDialog(gui.mainFrame, "Select Document to Analyze", wildcard="Doc|*.pdf;*.tif;*.tiff;*.txt;*.py;*.md", style=wx.FD_OPEN)
         if dlg.ShowModal() == wx.ID_OK:
             path = dlg.GetPath()
-            threading.Thread(target=self._process_doc_file, args=(path,)).start()
+            threading.Thread(target=self._process_doc_file, args=(path,), daemon=True).start()
         dlg.Destroy()
     def _process_doc_file(self, path):
         try:
@@ -575,63 +693,77 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
         except: wx.CallAfter(ui.message, "Error loading doc.")
         
     def _open_doc_chat_dialog(self, init_msg, initial_attachments, doc_text):
-        def doc_callback(ctx_atts, q, dum1, dum2):
+        def doc_callback(ctx_atts, q, history, dum2):
             lang = config.conf["VisionAssistant"]["ai_response_language"]
             atts = ctx_atts if ctx_atts else []
-            p = f"User Question: {q}\nRespond in {lang}."
-            if doc_text: p = f"Document:\n{doc_text}\n\n{p}"
-            if atts and len(q) < 5: p += " Describe/Analyze this file."
-            return self._call_gemini(p, attachments=atts), None
             
-        dlg = VisionQADialog(gui.mainFrame, "Doc QA", init_msg, initial_attachments, doc_callback)
+            current_user_msg = {"role": "user", "parts": [{"text": f"{q} (STRICTLY Respond in {lang})"}]}
+            
+            messages = []
+            if not history:
+                parts = []
+                if doc_text: parts.append({"text": f"Document Content:\n{doc_text}\n\nTask: Analyze. Language: {lang}."})
+                else: parts.append({"text": f"Analyze this file. Respond in {lang}."})
+                
+                for att in atts:
+                    parts.append({"inline_data": {"mime_type": att['mime_type'], "data": att['data']}})
+                
+                messages.append({"role": "user", "parts": parts})
+                messages.append({"role": "model", "parts": [{"text": init_msg}]})
+            else:
+                messages.extend(history)
+                
+            messages.append(current_user_msg)
+            return self._call_gemini(messages), None
+            
+        dlg = VisionQADialog(gui.mainFrame, "Vision Assistant - Document Chat", init_msg, initial_attachments, doc_callback)
         dlg.Show()
 
-    # --- Feature 5: Vision ---
     def script_ocrFullScreen(self, gesture):
-        """Performs OCR and description on the entire screen."""
         self._start_vision(True)
     def script_describeObject(self, gesture):
-        """Describes the current object (Navigator Object)."""
         self._start_vision(False)
     def _start_vision(self, full):
         if full: d, w, h = self._capture_fullscreen()
         else: d, w, h = self._capture_navigator()
         if d:
             ui.message("Scanning...")
-            threading.Thread(target=self._thread_vision, args=(d, w, h)).start()
+            threading.Thread(target=self._thread_vision, args=(d, w, h), daemon=True).start()
         else: ui.message("Capture failed.")
     def _thread_vision(self, img, w, h):
         lang = config.conf["VisionAssistant"]["ai_response_language"]
-        p = f"Describe concisely in {lang}."
+        p = f"Analyze this image and describe it. Language: {lang}. Ensure the response is strictly in {lang}."
         att = [{'mime_type': 'image/png', 'data': img}]
         desc = self._call_gemini(p, attachments=att)
-        wx.CallAfter(self._open_vision_dialog, desc, att, (w, h))
+        wx.CallAfter(self._open_vision_dialog, desc, att, None)
         
     def _open_vision_dialog(self, text, atts, size):
-        def cb(atts, q, is_loc, sz):
-            if is_loc and sz:
-                p = PROMPT_UI_LOCATOR.format(width=sz[0], height=sz[1], query=q)
-                res = self._call_gemini(p, attachments=atts, json_mode=True)
-                try:
-                    d = json.loads(res)
-                    if d.get("found"): return f"Found at {d['x']},{d['y']}.", (d['x'], d['y'])
-                    return "Not found.", None
-                except: return "Error.", None
+        def cb(atts, q, history, sz):
+            lang = config.conf["VisionAssistant"]["ai_response_language"]
+            current_user_msg = {"role": "user", "parts": [{"text": f"{q} (Answer strictly in {lang})"}]}
+            
+            messages = []
+            if not history:
+                parts = [{"text": f"Image Context. Target Language: {lang}"}]
+                for att in atts:
+                    parts.append({"inline_data": {"mime_type": att['mime_type'], "data": att['data']}})
+                messages.append({"role": "user", "parts": parts})
+                messages.append({"role": "model", "parts": [{"text": text}]})
             else:
-                lang = config.conf["VisionAssistant"]["ai_response_language"]
-                p = f"Context: {text}. Q: {q}. Respond in {lang}."
-                return self._call_gemini(p, attachments=atts), None
-        dlg = VisionQADialog(gui.mainFrame, "Vision", text, atts, cb, size)
+                messages.extend(history)
+                
+            messages.append(current_user_msg)
+            return self._call_gemini(messages), None
+            
+        dlg = VisionQADialog(gui.mainFrame, "Vision Assistant - Image Analysis", text, atts, cb, None)
         dlg.Show()
 
-    # --- Feature 6: Audio ---
     def script_transcribeAudio(self, gesture):
-        """Transcribes a selected audio file."""
         wx.CallAfter(self._open_audio)
     def _open_audio(self):
         dlg = wx.FileDialog(gui.mainFrame, "Select Audio File to Transcribe", wildcard="Audio|*.mp3;*.wav;*.ogg", style=wx.FD_OPEN)
         if dlg.ShowModal() == wx.ID_OK:
-            threading.Thread(target=self._thread_audio, args=(dlg.GetPath(),)).start()
+            threading.Thread(target=self._thread_audio, args=(dlg.GetPath(),), daemon=True).start()
         dlg.Destroy()
     def _thread_audio(self, path):
         try:
@@ -643,12 +775,10 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
             p = f"Transcribe in {lang}."
             mt = "audio/mpeg" if path.endswith(".mp3") else "audio/wav"
             res = self._call_gemini(p, attachments=[{'mime_type': mt, 'data': d}])
-            wx.CallAfter(lambda: ResultDialog(gui.mainFrame, "Transcript", res).ShowModal())
+            wx.CallAfter(lambda: ResultDialog(gui.mainFrame, "Vision Assistant - Audio Transcript", res).ShowModal())
         except: wx.CallAfter(ui.message, "Error.")
 
-    # --- Feature 7: Captcha ---
     def script_solveCaptcha(self, gesture):
-        """Attempts to solve a CAPTCHA on the screen or navigator object."""
         mode = config.conf["VisionAssistant"]["captcha_mode"]
         if mode == 'fullscreen': d, w, h = self._capture_fullscreen()
         else: d, w, h = self._capture_navigator()
@@ -661,7 +791,7 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 
         if d:
             ui.message("Solving...")
-            threading.Thread(target=self._thread_cap, args=(d, is_gov)).start()
+            threading.Thread(target=self._thread_cap, args=(d, is_gov), daemon=True).start()
         else: ui.message("Capture failed.")
         
     def _thread_cap(self, d, is_gov):
@@ -678,7 +808,10 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
         ui.message(f"Captcha: {text}")
         wx.CallLater(800, send_ctrl_v)
 
-    # --- Utils ---
+    def script_checkUpdate(self, gesture):
+        ui.message("Checking for updates...")
+        self.updater.check_for_updates(silent=False)
+
     def _capture_navigator(self):
         try:
             obj = api.getNavigatorObject()
@@ -702,16 +835,14 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
         except: return None,0,0
 
     def script_readLastTranslation(self, gesture):
-        """Announces the last received translation."""
         if self.last_translation: ui.message(f"Last: {self.last_translation}")
         else: ui.message("No history.")
     
     def script_translateClipboard(self, gesture):
-        """Translates the text currently in the clipboard."""
         t = api.getClipData()
         if t: 
             ui.message("Translating Clipboard...")
-            threading.Thread(target=self._thread_translate, args=(t,)).start()
+            threading.Thread(target=self._thread_translate, args=(t,), daemon=True).start()
         else:
             ui.message("Clipboard empty.")
 
@@ -726,4 +857,5 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
         "kb:NVDA+shift+l": "readLastTranslation",
         "kb:NVDA+shift+y": "translateClipboard",
         "kb:NVDA+shift+s": "smartDictation",
+        "kb:NVDA+shift+u": "checkUpdate",
     }
