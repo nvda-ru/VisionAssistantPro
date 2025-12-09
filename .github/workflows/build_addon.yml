@@ -46,7 +46,6 @@ jobs:
         path: |
           ./*.nvda-addon
           ./*.pot
-          ./changelog.md
 
   upload_release:
     runs-on: ubuntu-latest
@@ -62,15 +61,12 @@ jobs:
       run: ls -R
     - name: Calculate sha256
       run: |
-        sed -i 's/\\#/#/g' changelog.md
-        sed -i 's/\\\*/*/g' changelog.md
         echo -e "\nSHA256: " >> changelog.md
         sha256sum *.nvda-addon >> changelog.md
 
     - name: Release
       uses: softprops/action-gh-release@v2
       with:
-        name: Vision Assistant Pro ${{ github.ref_name }}
         files: |
           *.nvda-addon
           *.pot
