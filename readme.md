@@ -33,6 +33,7 @@ To ensure maximum compatibility with laptop layouts, all shortcuts use **NVDA + 
 | NVDA+Ctrl+Shift+A           | Audio Transcription  | Transcribe MP3/WAV/OGG files.                                               |
 | NVDA+Ctrl+Shift+L           | Last Translation     | Re-read last translation without API.                                      |
 | NVDA+Ctrl+Shift+U           | Update Check         | Check GitHub for latest version.                                            |
+| NVDA+Ctrl+Shift+I           | Status Reporting     | Announces the current status (e.g., "Uploading...", "Idle").                |
 
 ## 3. Custom Prompts & Variables
 
@@ -58,6 +59,18 @@ Create commands in Settings: `Name:Prompt Text` (separate with `|` or new lines)
 - **Code Debugger:** `Debug:Find bugs in this code and explain them: [selection]`
 
 **Note:** File uploads limited to 15MB. Internet required. Multi-page TIFFs supported.
+
+## Changes for 2.8
+* Added Italian translation.
+* **Status Reporting:** Added a new command (NVDA+Control+Shift+I) to announce the current status of the add-on (e.g., "Uploading...", "Analyzing...").
+* **HTML Export:** The "Save Content" button in result dialogs now saves output as a formatted HTML file, preserving styles like headings and bold text.
+* **Settings UI:** Improved the Settings panel layout with accessible grouping.
+* **New Models:** Added support for gemini-flash-latest and gemini-flash-lite-latest.
+* **Languages:** Added Nepali to supported languages.
+* **Refine Menu Logic:** Fixed a critical bug where "Refine Text" commands would fail if the NVDA interface language was not English.
+* **Dictation:** Improved silence detection to prevent incorrect text output when no speech is input.
+* **Update Settings:** "Check for updates on startup" is now disabled by default to comply with Add-on Store policies.
+* Code Cleanup.
 
 ## Changes for 2.7
 * Migrated project structure to the official NV Access Add-on Template for better standards compliance.

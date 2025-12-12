@@ -31,6 +31,8 @@ ADDON_NAME = addonHandler.getCodeAddon().manifest["summary"]
 # --- Configuration ---
 
 MODELS = [
+    "gemini-flash-lite-latest",
+    "gemini-flash-latest",
     "gemini-2.5-flash-lite",
     "gemini-2.5-flash",
     "gemini-2.0-flash"
@@ -41,7 +43,7 @@ BASE_LANGUAGES = [
     ("Dutch", "nl"), ("English", "en"), ("Finnish", "fi"), ("French", "fr"),
     ("German", "de"), ("Greek", "el"), ("Hebrew", "he"), ("Hindi", "hi"),
     ("Hungarian", "hu"), ("Indonesian", "id"), ("Italian", "it"), ("Japanese", "ja"),
-    ("Korean", "ko"), ("Norwegian", "no"), ("Persian", "fa"), ("Polish", "pl"),
+    ("Korean", "ko"), ("Nepali", "ne"), ("Norwegian", "no"), ("Persian", "fa"), ("Polish", "pl"),
     ("Portuguese", "pt"), ("Romanian", "ro"), ("Russian", "ru"), ("Spanish", "es"),
     ("Swedish", "sv"), ("Thai", "th"), ("Turkish", "tr"), ("Ukrainian", "uk"),
     ("Vietnamese", "vi")
@@ -76,6 +78,52 @@ def clean_markdown(text):
     text = re.sub(r'\[([^\]]+)\]\([^\)]+\)', r'\1', text)
     text = re.sub(r'^\s*-\s+', '', text, flags=re.MULTILINE)
     return text.strip()
+
+def text_to_simple_html(text):
+    if not text: return ""
+    
+    html = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    
+    html = re.sub(r'```(.*?)```', r'<pre><code>\1</code></pre>', html, flags=re.DOTALL)
+    html = re.sub(r'`(.*?)`', r'<code>\1</code>', html)
+    
+    html = re.sub(r'\*\*(.*?)\*\*', r'<strong>\1</strong>', html)
+    html = re.sub(r'\*(.*?)\*', r'<em>\1</em>', html)
+    
+    html = re.sub(r'^### (.*)$', r'<h3>\1</h3>', html, flags=re.MULTILINE)
+    html = re.sub(r'^## (.*)$', r'<h2>\1</h2>', html, flags=re.MULTILINE)
+    html = re.sub(r'^# (.*)$', r'<h1>\1</h1>', html, flags=re.MULTILINE)
+    
+    html = re.sub(r'^\* (.*)$', r'<li>\1</li>', html, flags=re.MULTILINE)
+    html = re.sub(r'^- (.*)$', r'<li>\1</li>', html, flags=re.MULTILINE)
+    
+    lines = html.split('\n')
+    processed_lines = []
+    in_list = False
+    
+    for line in lines:
+        if line.strip().startswith('<li>'):
+            if not in_list:
+                processed_lines.append('<ul>')
+                in_list = True
+            processed_lines.append(line)
+        else:
+            if in_list:
+                processed_lines.append('</ul>')
+                in_list = False
+            
+            if not line.strip():
+                continue
+                
+            if not (line.startswith('<h') or line.startswith('<pre') or line.startswith('<ul') or line.startswith('<li')):
+                processed_lines.append(f'<p>{line}</p>')
+            else:
+                processed_lines.append(line)
+                
+    if in_list:
+        processed_lines.append('</ul>')
+        
+    return "\n".join(processed_lines)
 
 def get_mime_type(path):
     ext = os.path.splitext(path)[1].lower()
@@ -180,7 +228,9 @@ class UpdateManager:
                                 break
                         
                         if download_url:
-                            wx.CallAfter(self._prompt_update, latest_tag, download_url, data.get("body", ""))
+                            raw_changes = data.get("body", "")
+                            clean_changes = clean_markdown(raw_changes)
+                            wx.CallAfter(self._prompt_update, latest_tag, download_url, clean_changes)
                         elif not silent:
                             # Translators: Error message when update is detected but file is missing
                             msg = _("Update found but no .nvda-addon file in release.")
@@ -233,12 +283,14 @@ class UpdateManager:
 # --- UI Classes ---
 
 class VisionQADialog(wx.Dialog):
-    def __init__(self, parent, title, initial_text, context_data, callback_fn, extra_info=None):
+    def __init__(self, parent, title, initial_text, context_data, callback_fn, extra_info=None, raw_content=None, status_callback=None):
         super(VisionQADialog, self).__init__(parent, title=title, size=(550, 500), style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER)
         self.context_data = context_data 
         self.callback_fn = callback_fn
         self.extra_info = extra_info
         self.chat_history = [] 
+        self.raw_content = raw_content
+        self.status_callback = status_callback
         
         mainSizer = wx.BoxSizer(wx.VERTICAL)
         # Translators: Label for the AI response text area in a chat dialog
@@ -266,10 +318,18 @@ class VisionQADialog(wx.Dialog):
         btnSizer = wx.BoxSizer(wx.HORIZONTAL)
         # Translators: Button to send message in a chat dialog
         self.askBtn = wx.Button(self, label=_("Send"))
+        
+        if self.raw_content:
+            # Translators: Button to save only the result content without chat history
+            self.saveContentBtn = wx.Button(self, label=_("Save Content"))
+            self.saveContentBtn.Bind(wx.EVT_BUTTON, self.onSaveContent)
+            btnSizer.Add(self.saveContentBtn, 0, wx.ALL, 5)
+
         # Translators: Button to save chat in a chat dialog
         self.saveBtn = wx.Button(self, label=_("Save Chat"))
         # Translators: Button to close chat dialog
         self.closeBtn = wx.Button(self, wx.ID_CANCEL, label=_("Close"))
+        
         btnSizer.Add(self.askBtn, 0, wx.ALL, 5)
         btnSizer.Add(self.saveBtn, 0, wx.ALL, 5)
         btnSizer.Add(self.closeBtn, 0, wx.ALL, 5)
@@ -313,6 +373,12 @@ class VisionQADialog(wx.Dialog):
         self.outputArea.ShowPosition(self.outputArea.GetLastPosition())
         ui.message(text)
 
+    def report_save(self, msg):
+        if self.status_callback:
+            self.status_callback(msg)
+        else:
+            ui.message(msg)
+
     def onSave(self, event):
         # Translators: Save dialog title
         fd = wx.FileDialog(self, _("Save Chat Log"), wildcard="Text files (*.txt)|*.txt", style=wx.FD_SAVE | wx.FD_OVERWRITE_PROMPT)
@@ -322,13 +388,50 @@ class VisionQADialog(wx.Dialog):
                 with open(path, "w", encoding="utf-8") as f:
                     f.write(self.outputArea.GetValue())
                 # Translators: Message on successful save
-                ui.message(_("Saved."))
+                self.report_save(_("Saved."))
             except Exception as e:
                 # Translators: Message in the error dialog when saving fails.
                 msg = _("Save failed: {error}").format(error=e)
                 show_error_dialog(msg)
         fd.Destroy()
 
+    def onSaveContent(self, event):
+        # Translators: Save dialog title
+        fd = wx.FileDialog(self, _("Save Result"), wildcard="HTML files (*.html)|*.html", style=wx.FD_SAVE | wx.FD_OVERWRITE_PROMPT)
+        if fd.ShowModal() == wx.ID_OK:
+            path = fd.GetPath()
+            try:
+                body_content = text_to_simple_html(self.raw_content)
+                html_template = f"""
+                <!DOCTYPE html>
+                <html lang="en">
+                <head>
+                    <meta charset="UTF-8">
+                    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+                    <title>{ADDON_NAME} Result</title>
+                    <style>
+                        body {{ font-family: "Segoe UI", Arial, sans-serif; line-height: 1.6; padding: 20px; color: #333; max-width: 800px; margin: 0 auto; }}
+                        h1, h2, h3 {{ color: #2c3e50; border-bottom: 1px solid #eee; padding-bottom: 5px; }}
+                        pre {{ background-color: #f4f4f4; padding: 10px; border-radius: 5px; overflow-x: auto; font-family: Consolas, monospace; }}
+                        code {{ background-color: #f4f4f4; padding: 2px 5px; border-radius: 3px; font-family: Consolas, monospace; }}
+                        strong {{ color: #000; }}
+                        li {{ margin-bottom: 5px; }}
+                    </style>
+                </head>
+                <body>
+                    {body_content}
+                </body>
+                </html>
+                """
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write(html_template)
+                # Translators: Message on successful save
+                self.report_save(_("Saved."))
+            except Exception as e:
+                # Translators: Message in the error dialog when saving fails.
+                msg = _("Save failed: {error}").format(error=e)
+                show_error_dialog(msg)
+        fd.Destroy()
 
 class SettingsPanel(gui.settingsDialogs.SettingsPanel):
     title = ADDON_NAME
@@ -338,7 +441,6 @@ class SettingsPanel(gui.settingsDialogs.SettingsPanel):
         groupLabel = _("Connection")
         connectionBox = wx.StaticBox(self, label=groupLabel)
         connectionSizer = wx.StaticBoxSizer(connectionBox, wx.VERTICAL)
-        # Fix: Use connectionBox as parent for controls so NVDA reads group correctly
         cHelper = gui.guiHelper.BoxSizerHelper(connectionBox, sizer=connectionSizer)
 
         # Translators: Label for API Key input
@@ -365,7 +467,6 @@ class SettingsPanel(gui.settingsDialogs.SettingsPanel):
         groupLabel = _("Translation Languages")
         langBox = wx.StaticBox(self, label=groupLabel)
         langSizer = wx.StaticBoxSizer(langBox, wx.VERTICAL)
-        # Fix: Use langBox as parent
         lHelper = gui.guiHelper.BoxSizerHelper(langBox, sizer=langSizer)
 
         # Translators: Label for Source Language selection
@@ -416,7 +517,6 @@ class SettingsPanel(gui.settingsDialogs.SettingsPanel):
         groupLabel = _("Custom Prompts")
         promptsBox = wx.StaticBox(self, label=groupLabel)
         promptsSizer = wx.StaticBoxSizer(promptsBox, wx.VERTICAL)
-        # Fix: Use promptsBox as parent
         pHelper = gui.guiHelper.BoxSizerHelper(promptsBox, sizer=promptsSizer)
 
         # Translators: Helper text explaining the format for custom prompts
@@ -453,6 +553,9 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
     _last_source_text = None
     _last_params = None
     update_timer = None
+    
+    # Translators: Initial status when the add-on is doing nothing
+    current_status = _("Idle")
 
     def __init__(self):
         super(GlobalPlugin, self).__init__()
@@ -479,6 +582,18 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
         self.translation_cache = {}
         self._last_source_text = None
         gc.collect()
+
+    def report_status(self, msg):
+        self.current_status = msg
+        ui.message(msg)
+
+    # Translators: Script description for Input Gestures dialog
+    @scriptHandler.script(description=_("Announces the current status of the add-on."))
+    def script_announceStatus(self, gesture):
+        # Translators: Status message when the add-on is doing nothing
+        idle_msg = _("Idle")
+        msg = self.current_status if self.current_status else idle_msg
+        ui.message(msg)
 
     def _upload_file_to_gemini(self, file_path, mime_type):
         api_key = config.conf["VisionAssistant"]["api_key"].strip()
@@ -508,14 +623,17 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
         except error.URLError as e:
             # Translators: Message of a dialog which may pop up while trying to upload a file
             msg = _("Upload Connection Error: {reason}").format(reason=e.reason)
+            self.report_status(msg)
             show_error_dialog(msg)
         except error.HTTPError as e:
             # Translators: Message of a dialog which may pop up while trying to upload a file
             msg = _("Upload Server Error {code}: {reason}").format(code=e.code, reason=e.reason)
+            self.report_status(msg)
             show_error_dialog(msg)
         except Exception as e:
             # Translators: Message of a dialog which may pop up while trying to upload a file
             msg = _("File Upload Error: {error}").format(error=e)
+            self.report_status(msg)
             show_error_dialog(msg)
         return None
 
@@ -527,7 +645,7 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
         if not api_key:
             # Translators: Message of a dialog which may pop up while performing an AI call
             msg = _("API Key missing.")
-            wx.CallAfter(ui.message, msg)
+            wx.CallAfter(self.report_status, msg)
             return None
 
         base_url = proxy_url.rstrip('/') if proxy_url else "https://generativelanguage.googleapis.com"
@@ -558,7 +676,7 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
         }
         if json_mode: data["generationConfig"]["response_mime_type"] = "application/json"
 
-        max_retries = 3
+        max_retries = 10
         for attempt in range(max_retries + 1):
             try:
                 req = request.Request(url, data=json.dumps(data).encode('utf-8'), headers=headers)
@@ -566,7 +684,7 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
                     if response.status == 200:
                         res = json.loads(response.read().decode('utf-8'))
                         text = res['candidates'][0]['content']['parts'][0]['text'].strip()
-                        return text if json_mode else clean_markdown(text)
+                        return text
             except error.HTTPError as e:
                 if (e.code == 503 or e.code == 429) and attempt < max_retries:
                     time.sleep(2)
@@ -618,7 +736,7 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
                 ctypes.windll.winmm.mciSendStringW('record myaudio', None, 0, 0)
                 # Translators: Message reported when dictation starts
                 msg = _("Listening...")
-                ui.message(msg)
+                self.report_status(msg)
             except Exception as e:
                 # Translators: Message in an error dialog which can pop up while trying dictation.
                 msg = _("Audio Hardware Error: {error}").format(error=e)
@@ -632,7 +750,7 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
                 ctypes.windll.winmm.mciSendStringW('close myaudio', None, 0, 0)
                 # Translators: Message reported when processing dictation
                 msg = _("Typing...")
-                ui.message(msg)
+                self.report_status(msg)
                 threading.Thread(target=self._thread_dictation, daemon=True).start()
             except Exception as e:
                 # Translators: Message in an error dialog which can pop up while trying dictation.
@@ -654,13 +772,14 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
                 if "[[[NOSPEECH]]]" in clean_res:
                     # Translators: Message reported when the AI detects silence or empty speech
                     msg = _("No speech detected.")
-                    wx.CallAfter(ui.message, msg)
+                    wx.CallAfter(self.report_status, msg)
                 else:
-                    wx.CallAfter(self._paste_text, res)
+                    cleaned_text = clean_markdown(res)
+                    wx.CallAfter(self._paste_text, cleaned_text)
             else: 
                 # Translators: Message reported while trying dictation.
                 msg = _("No speech recognized or Error.")
-                wx.CallAfter(ui.message, msg)
+                wx.CallAfter(self.report_status, msg)
             
             try: os.remove(self.temp_audio_file)
             except: pass
@@ -675,7 +794,7 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
         preview = text[:100]
         # Translators: Message reported when dictation is complete
         msg = _("Typed: {text}").format(text=preview)
-        ui.message(msg)
+        self.report_status(msg)
 
     # Translators: Script description for Input Gestures dialog
     @scriptHandler.script(description=_("Translates the selected text or navigator object."))
@@ -685,12 +804,12 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
         if not text:
             # Translators: Message reported when calling translation command
             msg = _("No text found.")
-            ui.message(msg)
+            self.report_status(msg)
             return
             
         # Translators: Message reported when calling translation command
         msg = _("Translating...")
-        ui.message(msg)
+        self.report_status(msg)
         threading.Thread(target=self._thread_translate, args=(text,), daemon=True).start()
 
     def _thread_translate(self, text):
@@ -713,16 +832,17 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
         )
         res = self._call_gemini_safe(p)
         if res:
+            clean_res = clean_markdown(res)
             self._last_source_text = text
             self._last_params = current_params
-            self.last_translation = res
-            wx.CallAfter(self._announce_translation, res)
+            self.last_translation = clean_res
+            wx.CallAfter(self._announce_translation, clean_res)
 
     def _announce_translation(self, text):
         api.copyToClip(text)
         # Translators: Message reported when calling translation command
         msg = _("Translated: {text}").format(text=text)
-        ui.message(msg)
+        self.report_status(msg)
 
     def _get_text_smart(self):
         try:
@@ -738,9 +858,9 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
             if not obj: return None
             
             content = []
-            if obj.name: content.append(obj.name)
-            if obj.value: content.append(obj.value)
-            if obj.description: content.append(obj.description)
+            if getattr(obj, 'name', None): content.append(obj.name)
+            if getattr(obj, 'value', None): content.append(obj.value)
+            if getattr(obj, 'description', None): content.append(obj.description)
             
             if hasattr(obj, 'makeTextInfo'):
                 try: 
@@ -826,7 +946,7 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
             else:
                 # Translators: Message while processing request of the refine text command
                 msg = _("Processing...")
-                ui.message(msg)
+                self.report_status(msg)
                 threading.Thread(target=self._thread_refine, args=(text, custom_content, file_path), daemon=True).start()
         dlg.Destroy()
 
@@ -871,7 +991,7 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
             try:
                 # Translators: Message reported when executing the refine command
                 msg = _("Uploading file...")
-                wx.CallAfter(ui.message, msg)
+                self.report_status(msg)
                 mime_type = get_mime_type(file_path)
                 if "[file_ocr]" in prompt_text:
                     file_uri = self._upload_file_to_gemini(file_path, mime_type)
@@ -903,7 +1023,7 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
             
         # Translators: Message reported when executing the refine command
         msg = _("Analyzing...")
-        wx.CallAfter(ui.message, msg)
+        wx.CallAfter(self.report_status, msg)
         res = self._call_gemini_safe(prompt_text, attachments=attachments)
         
         if res:
@@ -943,7 +1063,16 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
         context = (attachments, original_text)
         has_file_context = any('file_uri' in a for a in attachments)
         # Translators: Title of Refine Result dialog
-        dlg = VisionQADialog(gui.mainFrame, _("{name} - Refine Result").format(name=ADDON_NAME), result_text, context, refine_callback, extra_info={'file_context': has_file_context, 'skip_init_history': False})
+        dlg = VisionQADialog(
+            gui.mainFrame, 
+            _("{name} - Refine Result").format(name=ADDON_NAME), 
+            result_text, 
+            context, 
+            refine_callback, 
+            extra_info={'file_context': has_file_context, 'skip_init_history': False},
+            raw_content=result_text,
+            status_callback=self.report_status
+        )
         dlg.Show()
 
     # Translators: Script description for Input Gestures dialog
@@ -965,7 +1094,7 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
     def _process_file_ocr(self, path):
         # Translators: Message reported when calling the OCR file recognition command
         msg = _("Uploading & Extracting...")
-        wx.CallAfter(ui.message, msg)
+        wx.CallAfter(self.report_status, msg)
         mime_type = get_mime_type(path)
         
         file_uri = self._upload_file_to_gemini(path, mime_type)
@@ -975,7 +1104,7 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
             
             res = self._call_gemini_safe("Extract all text from this file as plain text. Do not use JSON or bounding boxes.", attachments=att)
             if res:
-                wx.CallAfter(self._open_doc_chat_dialog, res, att, "")
+                wx.CallAfter(self._open_doc_chat_dialog, res, att, "", res)
         else:
             pass
 
@@ -998,7 +1127,7 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
     def _process_doc_file(self, path):
         # Translators: Message reported when calling the file analysis command
         msg = _("Uploading & Analyzing...")
-        wx.CallAfter(ui.message, msg)
+        wx.CallAfter(self.report_status, msg)
         mime_type = get_mime_type(path)
         
         file_uri = self._upload_file_to_gemini(path, mime_type)
@@ -1012,7 +1141,7 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
         else:
             pass
         
-    def _open_doc_chat_dialog(self, init_msg, initial_attachments, doc_text):
+    def _open_doc_chat_dialog(self, init_msg, initial_attachments, doc_text, raw_text_for_save=None):
         def doc_callback(ctx_atts, q, history, dum2):
             lang = config.conf["VisionAssistant"]["ai_response_language"]
             atts = ctx_atts if ctx_atts else []
@@ -1033,7 +1162,16 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
                 return self._call_gemini_safe(messages), None
             
         # Translators: Dialog title for a Chat dialog
-        dlg = VisionQADialog(gui.mainFrame, _("{name} - Chat").format(name=ADDON_NAME), init_msg, initial_attachments, doc_callback, extra_info={'skip_init_history': True})
+        dlg = VisionQADialog(
+            gui.mainFrame, 
+            _("{name} - Chat").format(name=ADDON_NAME), 
+            init_msg, 
+            initial_attachments, 
+            doc_callback, 
+            extra_info={'skip_init_history': True},
+            raw_content=raw_text_for_save,
+            status_callback=self.report_status
+        )
         dlg.Show()
 
     # Translators: Script description for Input Gestures dialog
@@ -1052,11 +1190,12 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
         if d:
             # Translators: Message reported when calling an image analysis command
             msg = _("Scanning...")
-            ui.message(msg)
+            self.report_status(msg)
             wx.CallLater(100, lambda: threading.Thread(target=self._thread_vision, args=(d, w, h), daemon=True).start())
         else: 
             # Translators: Message reported when calling an image analysis command
-            ui.message(_("Capture failed."))
+            msg = _("Capture failed.")
+            self.report_status(msg)
 
     def _thread_vision(self, img, w, h):
         lang = config.conf["VisionAssistant"]["ai_response_language"]
@@ -1085,7 +1224,16 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
             return self._call_gemini_safe(messages), None
             
         # Translators: Dialog title for Image Analysis
-        dlg = VisionQADialog(gui.mainFrame, _("{name} - Image Analysis").format(name=ADDON_NAME), text, atts, cb, None)
+        dlg = VisionQADialog(
+            gui.mainFrame, 
+            _("{name} - Image Analysis").format(name=ADDON_NAME), 
+            text, 
+            atts, 
+            cb, 
+            None,
+            raw_content=text,
+            status_callback=self.report_status
+        )
         dlg.Show()
 
     # Translators: Script description for Input Gestures dialog
@@ -1104,26 +1252,31 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
         dlg.Destroy()
 
     def _thread_audio(self, path):
-        # Translators: Message reported when calling the audio transcription command
-        msg = _("Uploading...")
-        wx.CallAfter(ui.message, msg)
-        mime_type = get_mime_type(path)
-        
-        file_uri = self._upload_file_to_gemini(path, mime_type)
-        if not file_uri: return
+        try:
+            # Translators: Message reported when calling the audio transcription command
+            msg = _("Uploading...")
+            wx.CallAfter(self.report_status, msg)
+            mime_type = get_mime_type(path)
+            
+            file_uri = self._upload_file_to_gemini(path, mime_type)
+            if not file_uri: return
 
-        # Translators: Message reported when calling the audio transcription command
-        msg = _("Analyzing...")
-        wx.CallAfter(ui.message, msg)
-        lang = config.conf["VisionAssistant"]["ai_response_language"]
-        p = f"Transcribe this audio in {lang}."
-        
-        att = [{'mime_type': mime_type, 'file_uri': file_uri}]
-        res = self._call_gemini_safe(p, attachments=att)
-        
-        if res:
-            init_msg = res 
-            wx.CallAfter(self._open_doc_chat_dialog, init_msg, att, "")
+            # Translators: Message reported when calling the audio transcription command
+            msg = _("Analyzing...")
+            wx.CallAfter(self.report_status, msg)
+            lang = config.conf["VisionAssistant"]["ai_response_language"]
+            p = f"Transcribe this audio in {lang}."
+            
+            att = [{'mime_type': mime_type, 'file_uri': file_uri}]
+            res = self._call_gemini_safe(p, attachments=att)
+            
+            if res:
+                init_msg = res 
+                wx.CallAfter(self._open_doc_chat_dialog, init_msg, att, "", res)
+        except: 
+            # Translators: Generic error message when audio processing fails
+            msg = _("Error processing audio.")
+            wx.CallAfter(self.report_status, msg)
 
     # Translators: Script description for Input Gestures dialog
     @scriptHandler.script(description=_("Attempts to solve a CAPTCHA on the screen or navigator object."))
@@ -1141,11 +1294,12 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
         if d:
             # Translators: Message reported when calling the CAPTCHA solving command
             msg = _("Solving...")
-            ui.message(msg)
+            self.report_status(msg)
             threading.Thread(target=self._thread_cap, args=(d, is_gov), daemon=True).start()
         else: 
             # Translators: Message reported when calling the CAPTCHA solving command
-            ui.message(_("Capture failed."))
+            msg = _("Capture failed.")
+            self.report_status(msg)
         
     def _thread_cap(self, d, is_gov):
         p = "Blind user. Return CAPTCHA code only."
@@ -1154,22 +1308,24 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
         
         r = self._call_gemini_safe(p, attachments=[{'mime_type': 'image/png', 'data': d}])
         if r: wx.CallAfter(self._finish_captcha, r)
-        # Translators: Message reported when calling the CAPTCHA solving command
-        else: wx.CallAfter(ui.message, _("Failed."))
+        else: 
+            # Translators: Message reported when calling the CAPTCHA solving command
+            msg = _("Failed.")
+            wx.CallAfter(self.report_status, msg)
 
     def _finish_captcha(self, text):
         api.copyToClip(text)
         send_ctrl_v()
         # Translators: Message reported when calling the CAPTCHA solving command
         msg = _("Captcha: {text}").format(text=text)
-        wx.CallLater(200, ui.message, msg)
+        wx.CallLater(200, self.report_status, msg)
 
     # Translators: Script description for Input Gestures dialog
     @scriptHandler.script(description=_("Checks for updates manually."))
     def script_checkUpdate(self, gesture):
         # Translators: Message reported when calling the update command
         msg = _("Checking for updates...")
-        ui.message(msg)
+        self.report_status(msg)
         self.updater.check_for_updates(silent=False)
 
     def _capture_navigator(self):
@@ -1200,7 +1356,8 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
         if self.last_translation: ui.message(f"Last: {self.last_translation}")
         else: 
             # Translators: Message called when trying to repeat the last translation
-            ui.message(_("No history."))
+            msg = _("No history.")
+            self.report_status(msg)
     
     # Translators: Script description for Input Gestures dialog
     @scriptHandler.script(description=_("Translates the text currently in the clipboard."))
@@ -1209,12 +1366,12 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
         if t: 
             # Translators: Message when calling the command to translate from clipboard
             msg = _("Translating Clipboard...")
-            ui.message(msg)
+            self.report_status(msg)
             threading.Thread(target=self._thread_translate, args=(t,), daemon=True).start()
         else:
             # Translators: Message when calling the command to translate from clipboard
             msg = _("Clipboard empty.")
-            ui.message(msg)
+            self.report_status(msg)
 
     __gestures = {
         "kb:NVDA+control+shift+t": "translateSmart",
@@ -1229,4 +1386,5 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
         "kb:NVDA+control+shift+y": "translateClipboard",
         "kb:NVDA+control+shift+s": "smartDictation",
         "kb:NVDA+control+shift+u": "checkUpdate",
+        "kb:NVDA+control+shift+i": "announceStatus",
     }
