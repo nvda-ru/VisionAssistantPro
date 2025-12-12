@@ -33,6 +33,7 @@ To ensure maximum compatibility with laptop layouts, all shortcuts use **NVDA + 
 | NVDA+Ctrl+Shift+A           | Audio Transcription  | Transcribe MP3/WAV/OGG files.                                               |
 | NVDA+Ctrl+Shift+L           | Last Translation     | Re-read last translation without API.                                      |
 | NVDA+Ctrl+Shift+U           | Update Check         | Check GitHub for latest version.                                            |
+| NVDA+Ctrl+Shift+I           | Status Reporting     | Announces the current status (e.g., "Uploading...", "Idle").                |
 
 ## 3. Custom Prompts & Variables
 
@@ -58,3 +59,59 @@ Create commands in Settings: `Name:Prompt Text` (separate with `|` or new lines)
 - **Code Debugger:** `Debug:Find bugs in this code and explain them: [selection]`
 
 **Note:** File uploads limited to 15MB. Internet required. Multi-page TIFFs supported.
+
+## Changes for 2.8
+* Added Italian translation.
+* **Status Reporting:** Added a new command (NVDA+Control+Shift+I) to announce the current status of the add-on (e.g., "Uploading...", "Analyzing...").
+* **HTML Export:** The "Save Content" button in result dialogs now saves output as a formatted HTML file, preserving styles like headings and bold text.
+* **Settings UI:** Improved the Settings panel layout with accessible grouping.
+* **New Models:** Added support for gemini-flash-latest and gemini-flash-lite-latest.
+* **Languages:** Added Nepali to supported languages.
+* **Refine Menu Logic:** Fixed a critical bug where "Refine Text" commands would fail if the NVDA interface language was not English.
+* **Dictation:** Improved silence detection to prevent incorrect text output when no speech is input.
+* **Update Settings:** "Check for updates on startup" is now disabled by default to comply with Add-on Store policies.
+* Code Cleanup.
+
+## Changes for 2.7
+* Migrated project structure to the official NV Access Add-on Template for better standards compliance.
+* Implemented automatic retry logic for HTTP 429 (Rate Limit) errors to ensure reliability during high traffic.
+* Optimized translation prompts for higher accuracy and better "Smart Swap" logic handling.
+* Updated Russian translation.
+
+## Changes for 2.6
+* Added Russian translation support (Thanks to nvda-ru).
+* Updated error messages to provide more descriptive feedback regarding connectivity.
+* Changed default target language to English.
+
+## Changes for 2.5
+* Added Native File OCR Command (NVDA+Control+Shift+F).
+* Added "Save Chat" button to result dialogs.
+* Implemented full localization support (i18n).
+* Migrated audio feedback to NVDA's native tones module.
+* Switched to Gemini File API for better handling of PDF and audio files.
+* Fixed crash when translating text containing curly braces.
+
+## Changes for 2.1.1
+* Fixed an issue where the [file_ocr] variable was not functioning correctly within Custom Prompts.
+
+## Changes for 2.1
+* Standardized all shortcuts to use NVDA+Control+Shift to eliminate conflicts with NVDA's Laptop layout and system hotkeys.
+
+## Changes for 2.0
+* Implemented built-in Auto-Update system.
+* Added Smart Translation Cache for instant retrieval of previously translated text.
+* Added Conversation Memory to contextually refine results in chat dialogs.
+* Added Dedicated Clipboard Translation command (NVDA+Control+Shift+Y).
+* Optimized AI prompts to strictly enforce target language output.
+* Fixed crash caused by special characters in input text.
+
+## Changes for 1.5
+* Added support for over 20 new languages.
+* Implemented Interactive Refine Dialog for follow-up questions.
+* Added Native Smart Dictation feature.
+* Added "Vision Assistant" category to NVDA's Input Gestures dialog.
+* Fixed COMError crashes in specific applications like Firefox and Word.
+* Added automatic retry mechanism for server errors.
+
+## Changes for 1.0
+* Initial release.
