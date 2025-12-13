@@ -63,7 +63,8 @@ confspec = {
     "smart_swap": "boolean(default=True)",
     "captcha_mode": "string(default='navigator')",
     "custom_prompts": "string(default='')",
-    "check_update_startup": "boolean(default=False)"
+    "check_update_startup": "boolean(default=False)",
+    "clean_markdown_chat": "boolean(default=True)"
 }
 
 GITHUB_REPO = "mahmoodhozhabri/VisionAssistantPro"
@@ -300,9 +301,11 @@ class VisionQADialog(wx.Dialog):
         self.outputArea = wx.TextCtrl(self, style=wx.TE_MULTILINE | wx.TE_READONLY)
         mainSizer.Add(self.outputArea, 1, wx.EXPAND | wx.ALL, 5)
         
-        clean_init = clean_markdown(initial_text)
+        self.should_clean = config.conf["VisionAssistant"]["clean_markdown_chat"]
+        
         # Translators: Format for displaying AI message in a chat dialog
-        init_msg = _("AI: {text}\n").format(text=clean_init)
+        display_text = clean_markdown(initial_text) if self.should_clean else initial_text
+        init_msg = _("AI: {text}\n").format(text=display_text)
         self.outputArea.AppendText(init_msg)
         
         if not (extra_info and extra_info.get('skip_init_history')):
@@ -341,7 +344,7 @@ class VisionQADialog(wx.Dialog):
         self.saveBtn.Bind(wx.EVT_BUTTON, self.onSave)
         self.inputArea.Bind(wx.EVT_TEXT_ENTER, self.onAsk)
         
-        wx.CallLater(300, ui.message, clean_init)
+        wx.CallLater(300, ui.message, display_text)
 
     def onAsk(self, event):
         question = self.inputArea.Value
@@ -360,11 +363,12 @@ class VisionQADialog(wx.Dialog):
         response_text, _ = result_tuple
         
         if response_text:
-            clean_resp = clean_markdown(response_text)
             if not (self.extra_info and self.extra_info.get('file_context')):
                  self.chat_history.append({"role": "user", "parts": [{"text": question}]})
                  self.chat_history.append({"role": "model", "parts": [{"text": response_text}]})
-            wx.CallAfter(self.update_response, clean_resp)
+            
+            final_text = clean_markdown(response_text) if self.should_clean else response_text
+            wx.CallAfter(self.update_response, final_text)
 
     def update_response(self, text):
         # Translators: Format for displaying AI message in a chat dialog
@@ -459,6 +463,10 @@ class SettingsPanel(gui.settingsDialogs.SettingsPanel):
         # Translators: Checkbox to enable/disable automatic update checks on NVDA startup
         self.checkUpdateStartup = cHelper.addItem(wx.CheckBox(connectionBox, label=_("Check for updates on startup")))
         self.checkUpdateStartup.Value = config.conf["VisionAssistant"]["check_update_startup"]
+        
+        # Translators: Checkbox to toggle markdown cleaning in chat windows
+        self.cleanMarkdown = cHelper.addItem(wx.CheckBox(connectionBox, label=_("Clean Markdown in Chat")))
+        self.cleanMarkdown.Value = config.conf["VisionAssistant"]["clean_markdown_chat"]
 
         settingsSizer.Add(connectionSizer, 0, wx.EXPAND | wx.ALL, 5)
 
@@ -536,6 +544,7 @@ class SettingsPanel(gui.settingsDialogs.SettingsPanel):
         config.conf["VisionAssistant"]["ai_response_language"] = TARGET_NAMES[self.aiResponseLang.GetSelection()]
         config.conf["VisionAssistant"]["smart_swap"] = self.smartSwap.Value
         config.conf["VisionAssistant"]["check_update_startup"] = self.checkUpdateStartup.Value
+        config.conf["VisionAssistant"]["clean_markdown_chat"] = self.cleanMarkdown.Value
         config.conf["VisionAssistant"]["captcha_mode"] = 'navigator' if self.captchaMode.GetSelection() == 0 else 'fullscreen'
         config.conf["VisionAssistant"]["custom_prompts"] = self.customPrompts.Value.strip()
 
@@ -564,6 +573,11 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
         
         self.updater = UpdateManager(GITHUB_REPO)
         
+        self.refine_dlg = None
+        self.refine_menu_dlg = None
+        self.vision_dlg = None
+        self.doc_dlg = None
+        
         if config.conf["VisionAssistant"]["check_update_startup"]:
             self.update_timer = wx.CallLater(10000, self.updater.check_for_updates, True)
 
@@ -573,6 +587,11 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
         
         if self.update_timer and self.update_timer.IsRunning():
             self.update_timer.Stop()
+        
+        for dlg in [self.refine_dlg, self.refine_menu_dlg, self.vision_dlg, self.doc_dlg]:
+            if dlg:
+                try: dlg.Destroy()
+                except: pass
         
         if self.is_recording:
             try:
@@ -594,6 +613,15 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
         idle_msg = _("Idle")
         msg = self.current_status if self.current_status else idle_msg
         ui.message(msg)
+
+    def _browse_file(self, wildcard):
+        # Translators: Standard title for opening a file
+        dlg = wx.FileDialog(gui.mainFrame, _("Open"), wildcard=wildcard, style=wx.FD_OPEN | wx.FD_FILE_MUST_EXIST)
+        path = None
+        if dlg.ShowModal() == wx.ID_OK:
+            path = dlg.GetPath()
+        dlg.Destroy()
+        return path
 
     def _upload_file_to_gemini(self, file_path, mime_type):
         api_key = config.conf["VisionAssistant"]["api_key"].strip()
@@ -672,19 +700,42 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
             "generationConfig": {
                 "temperature": 0.0, 
                 "topK": 40
-            }
+            },
+            "safetySettings": [
+                {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
+                {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+                {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+                {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"}
+            ]
         }
         if json_mode: data["generationConfig"]["response_mime_type"] = "application/json"
 
-        max_retries = 10
+        max_retries = 3
         for attempt in range(max_retries + 1):
             try:
                 req = request.Request(url, data=json.dumps(data).encode('utf-8'), headers=headers)
                 with request.urlopen(req, timeout=600) as response:
                     if response.status == 200:
                         res = json.loads(response.read().decode('utf-8'))
-                        text = res['candidates'][0]['content']['parts'][0]['text'].strip()
-                        return text
+                        
+                        if not res.get('candidates'):
+                            return None
+                            
+                        candidate = res['candidates'][0]
+                        
+                        if candidate.get('finishReason') == 'SAFETY':
+                            # Translators: Error message when AI refuses to answer due to safety guidelines
+                            return _("Error: Response blocked by AI safety filters.")
+                        
+                        content = candidate.get('content', {})
+                        parts = content.get('parts', [])
+                        
+                        if parts and 'text' in parts[0]:
+                            text = parts[0]['text'].strip()
+                            return text 
+                        else:
+                            return None
+
             except error.HTTPError as e:
                 if (e.code == 503 or e.code == 429) and attempt < max_retries:
                     time.sleep(2)
@@ -701,10 +752,6 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
     def _call_gemini_safe(self, *args, **kwargs):
         try:
             return self._call_gemini(*args, raise_errors=True, **kwargs)
-        except error.URLError as e:
-            # Translators: Message of a dialog which may pop up while performing an AI call
-            msg = _("Connection Error: {reason}").format(reason=e.reason)
-            show_error_dialog(msg)
         except error.HTTPError as e:
             if e.code == 400:
                 # Translators: Message of a dialog which may pop up while performing an AI call
@@ -718,6 +765,10 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
             else:
                 # Translators: Message of a dialog which may pop up while performing an AI call
                 msg = _("Server Error {code}: {reason}").format(code=e.code, reason=e.reason)
+            show_error_dialog(msg)
+        except error.URLError as e:
+            # Translators: Message of a dialog which may pop up while performing an AI call
+            msg = _("Connection Error: {reason}").format(reason=e.reason)
             show_error_dialog(msg)
         except Exception as e:
             # Translators: Message of a dialog which may pop up while performing an AI call
@@ -875,13 +926,20 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
     # Translators: Script description for Input Gestures dialog
     @scriptHandler.script(description=_("Opens a menu to Explain, Summarize, or Fix the selected text."))
     def script_refineText(self, gesture):
+        if self.refine_menu_dlg:
+            self.refine_menu_dlg.Raise()
+            self.refine_menu_dlg.SetFocus()
+            return
+        
+        if self.refine_dlg:
+            self.refine_dlg.Raise()
+            self.refine_dlg.SetFocus()
+            return
+
         text = self._get_text_smart()
         if not text: text = "" 
         
-        # Translators: Message reported when calling the text refinement (explain / summarize / fix) command
-        msg = _("Opening menu...")
-        ui.message(msg)
-        wx.CallLater(200, self._open_refine_dialog, text)
+        wx.CallLater(100, self._open_refine_dialog, text)
 
     def _open_refine_dialog(self, text):
         options = [
@@ -907,7 +965,7 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
         
         display_choices = [opt[0] for opt in options]
         
-        dlg = wx.SingleChoiceDialog(
+        self.refine_menu_dlg = wx.SingleChoiceDialog(
             gui.mainFrame,
             # Translators: Title of the Refine dialog
             _("Choose action:"),
@@ -915,8 +973,12 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
             _("Refine"),
             display_choices,
         )
-        if dlg.ShowModal() == wx.ID_OK:
-            selection_index = dlg.GetSelection()
+        
+        self.refine_menu_dlg.Raise()
+        self.refine_menu_dlg.SetFocus()
+        
+        if self.refine_menu_dlg.ShowModal() == wx.ID_OK:
+            selection_index = self.refine_menu_dlg.GetSelection()
             custom_content = options[selection_index][1]
 
             file_path = None
@@ -934,21 +996,17 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
                 wc = "Audio|*.mp3;*.wav;*.ogg"
             
             if needs_file:
-                # Translators: Title of a file selection dialog when calling refine command
-                title = _("Select File")
-                # Translators: Title of a file selection dialog when calling refine command
-                if "[file_ocr]" in custom_content: title = _("Select Image/PDF/TIFF for OCR")
-                fd = wx.FileDialog(gui.mainFrame, title, wildcard=wc, style=wx.FD_OPEN)
-                if fd.ShowModal() == wx.ID_OK:
-                    file_path = fd.GetPath()
-                    wx.CallLater(500, lambda: threading.Thread(target=self._thread_refine, args=(text, custom_content, file_path), daemon=True).start())
-                fd.Destroy()
+                file_path = self._browse_file(wc)
+                if file_path:
+                    wx.CallLater(200, lambda: threading.Thread(target=self._thread_refine, args=(text, custom_content, file_path), daemon=True).start())
             else:
                 # Translators: Message while processing request of the refine text command
                 msg = _("Processing...")
                 self.report_status(msg)
                 threading.Thread(target=self._thread_refine, args=(text, custom_content, file_path), daemon=True).start()
-        dlg.Destroy()
+        
+        self.refine_menu_dlg.Destroy()
+        self.refine_menu_dlg = None
 
     def _thread_refine(self, text, custom_content, file_path=None):
         target_lang = config.conf["VisionAssistant"]["target_language"]
@@ -991,7 +1049,7 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
             try:
                 # Translators: Message reported when executing the refine command
                 msg = _("Uploading file...")
-                self.report_status(msg)
+                wx.CallAfter(self.report_status, msg)
                 mime_type = get_mime_type(file_path)
                 if "[file_ocr]" in prompt_text:
                     file_uri = self._upload_file_to_gemini(file_path, mime_type)
@@ -1030,6 +1088,10 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
              wx.CallAfter(self._open_refine_result_dialog, res, attachments, text)
 
     def _open_refine_result_dialog(self, result_text, attachments, original_text):
+        if self.refine_dlg:
+            try: self.refine_dlg.Destroy()
+            except: pass
+
         def refine_callback(ctx, q, history, dum2):
             atts, orig = ctx
             parts = [{"text": q}]
@@ -1063,7 +1125,7 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
         context = (attachments, original_text)
         has_file_context = any('file_uri' in a for a in attachments)
         # Translators: Title of Refine Result dialog
-        dlg = VisionQADialog(
+        self.refine_dlg = VisionQADialog(
             gui.mainFrame, 
             _("{name} - Refine Result").format(name=ADDON_NAME), 
             result_text, 
@@ -1073,23 +1135,19 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
             raw_content=result_text,
             status_callback=self.report_status
         )
-        dlg.Show()
+        self.refine_dlg.Show()
+        self.refine_dlg.Raise()
 
     # Translators: Script description for Input Gestures dialog
     @scriptHandler.script(description=_("Recognizes text from a selected image or PDF file."))
     def script_fileOCR(self, gesture):
-        # Translators: Message reported while preparing to open OCR file selection dialog
-        msg = _("Select a file for OCR...")
-        ui.message(msg)
-        wx.CallLater(200, self._open_file_ocr_dialog)
+        wx.CallLater(100, self._open_file_ocr_dialog)
 
     def _open_file_ocr_dialog(self):
-        # Translators: File dialog title for File OCR
-        dlg = wx.FileDialog(gui.mainFrame, _("Select Image or PDF"), wildcard="Files|*.pdf;*.jpg;*.jpeg;*.png;*.webp;*.tif;*.tiff", style=wx.FD_OPEN)
-        if dlg.ShowModal() == wx.ID_OK:
-            path = dlg.GetPath()
+        wc = "Files|*.pdf;*.jpg;*.jpeg;*.png;*.webp;*.tif;*.tiff"
+        path = self._browse_file(wc)
+        if path:
             threading.Thread(target=self._process_file_ocr, args=(path,), daemon=True).start()
-        dlg.Destroy()
 
     def _process_file_ocr(self, path):
         # Translators: Message reported when calling the OCR file recognition command
@@ -1111,18 +1169,13 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
     # Translators: Script description for Input Gestures dialog
     @scriptHandler.script(description=_("Allows asking questions about a selected document (PDF/Text/Image)."))
     def script_analyzeDocument(self, gesture):
-        # Translators: Message reported when calling the file analysis command
-        msg = _("Select a document...")
-        ui.message(msg)
-        wx.CallLater(200, self._open_doc_dialog)
+        wx.CallLater(100, self._open_doc_dialog)
 
     def _open_doc_dialog(self):
-        # Translators: File dialog title for Document Analysis
-        dlg = wx.FileDialog(gui.mainFrame, _("Select Document to Analyze"), wildcard="Doc|*.pdf;*.tif;*.tiff;*.txt;*.py;*.md", style=wx.FD_OPEN)
-        if dlg.ShowModal() == wx.ID_OK:
-            path = dlg.GetPath()
+        wc = "Doc|*.pdf;*.tif;*.tiff;*.txt;*.py;*.md"
+        path = self._browse_file(wc)
+        if path:
             threading.Thread(target=self._process_doc_file, args=(path,), daemon=True).start()
-        dlg.Destroy()
 
     def _process_doc_file(self, path):
         # Translators: Message reported when calling the file analysis command
@@ -1142,6 +1195,10 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
             pass
         
     def _open_doc_chat_dialog(self, init_msg, initial_attachments, doc_text, raw_text_for_save=None):
+        if self.doc_dlg:
+            try: self.doc_dlg.Destroy()
+            except: pass
+
         def doc_callback(ctx_atts, q, history, dum2):
             lang = config.conf["VisionAssistant"]["ai_response_language"]
             atts = ctx_atts if ctx_atts else []
@@ -1162,7 +1219,7 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
                 return self._call_gemini_safe(messages), None
             
         # Translators: Dialog title for a Chat dialog
-        dlg = VisionQADialog(
+        self.doc_dlg = VisionQADialog(
             gui.mainFrame, 
             _("{name} - Chat").format(name=ADDON_NAME), 
             init_msg, 
@@ -1172,7 +1229,8 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
             raw_content=raw_text_for_save,
             status_callback=self.report_status
         )
-        dlg.Show()
+        self.doc_dlg.Show()
+        self.doc_dlg.Raise()
 
     # Translators: Script description for Input Gestures dialog
     @scriptHandler.script(description=_("Performs OCR and description on the entire screen."))
@@ -1206,6 +1264,10 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
             wx.CallAfter(self._open_vision_dialog, res, att, None)
         
     def _open_vision_dialog(self, text, atts, size):
+        if self.vision_dlg:
+            try: self.vision_dlg.Destroy()
+            except: pass
+
         def cb(atts, q, history, sz):
             lang = config.conf["VisionAssistant"]["ai_response_language"]
             current_user_msg = {"role": "user", "parts": [{"text": f"{q} (Answer strictly in {lang})"}]}
@@ -1224,7 +1286,7 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
             return self._call_gemini_safe(messages), None
             
         # Translators: Dialog title for Image Analysis
-        dlg = VisionQADialog(
+        self.vision_dlg = VisionQADialog(
             gui.mainFrame, 
             _("{name} - Image Analysis").format(name=ADDON_NAME), 
             text, 
@@ -1234,22 +1296,19 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
             raw_content=text,
             status_callback=self.report_status
         )
-        dlg.Show()
+        self.vision_dlg.Show()
+        self.vision_dlg.Raise()
 
     # Translators: Script description for Input Gestures dialog
     @scriptHandler.script(description=_("Transcribes a selected audio file."))
     def script_transcribeAudio(self, gesture):
-        # Translators: Message reported when calling the audio transcription command
-        msg = _("Select an audio file...")
-        ui.message(msg)
-        wx.CallLater(200, self._open_audio)
+        wx.CallLater(100, self._open_audio)
 
     def _open_audio(self):
-        # Translators: File dialog title for Audio Transcription
-        dlg = wx.FileDialog(gui.mainFrame, _("Select Audio File to Transcribe"), wildcard="Audio|*.mp3;*.wav;*.ogg", style=wx.FD_OPEN)
-        if dlg.ShowModal() == wx.ID_OK:
-            threading.Thread(target=self._thread_audio, args=(dlg.GetPath(),), daemon=True).start()
-        dlg.Destroy()
+        wc = "Audio|*.mp3;*.wav;*.ogg"
+        path = self._browse_file(wc)
+        if path:
+            threading.Thread(target=self._thread_audio, args=(path,), daemon=True).start()
 
     def _thread_audio(self, path):
         try:

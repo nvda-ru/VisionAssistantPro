@@ -60,6 +60,12 @@ Create commands in Settings: `Name:Prompt Text` (separate with `|` or new lines)
 
 **Note:** File uploads limited to 15MB. Internet required. Multi-page TIFFs supported.
 
+## Changes for 2.9
+*   **Added French translation.**
+*   **Markdown Setting:** Added a new option "Clean Markdown in Chat" in Settings. Unchecking this allows users to see raw Markdown syntax (e.g., `**`, `#`) in the chat window.
+*   **Dialog Management:** Fixed an issue where the "Refine Text" or chat windows would open multiple times or fail to focus correctly.
+*   **UX Improvements:** Standardized file dialog titles to "Open" and removed redundant speech announcements (e.g., "Opening menu...") for a smoother experience.
+
 ## Changes for 2.8
 * Added Italian translation.
 * **Status Reporting:** Added a new command (NVDA+Control+Shift+I) to announce the current status of the add-on (e.g., "Uploading...", "Analyzing...").

@@ -21,20 +21,14 @@ Features:
 - Audio Transcription (NVDA+Ctrl+Shift+A)
 - File Selection & OCR (NVDA+Ctrl+Shift+F)
 - Status Reporting (NVDA+Ctrl+Shift+I)"""),
-    addon_version="2.8.0",
+    addon_version="2.9.0",
     # Brief changelog for this version
     # Translators: what's new content for the add-on version to be shown in the add-on store
-    addon_changelog=_("""## Changes for 2.8
-*   **Added Italian translation.**
-*   **Status Reporting:** Added a new command (`NVDA+Control+Shift+I`) to announce the current status.
-*   **HTML Export:** "Save Content" now saves as formatted HTML.
-*   **Settings UI:** Improved layout with accessible grouping.
-*   **New Models:** Added `gemini-flash-latest` and `gemini-flash-lite-latest`.
-*   **Languages:** Added **Nepali**.
-*   **Refine Menu Logic:** Fixed a bug where commands failed in non-English interfaces.
-*   **Dictation:** Improved silence detection.
-*   **Update Settings:** Auto-update check is now disabled by default.
-*   **Code Cleanup.**"""),
+    addon_changelog=_("""## Changes for 2.9
+*   **Added French translation.**
+*   **Markdown Setting:** Added "Clean Markdown in Chat" option to view raw output.
+*   **Dialog Management:** Fixed focus issues and prevented duplicate windows.
+*   **UX Improvements:** Standardized file dialogs and removed redundant speech messages."""),
     addon_author="Mahmood Hozhabri",
     addon_url="https://github.com/mahmoodhozhabri/VisionAssistantPro",
     addon_sourceURL="https://github.com/mahmoodhozhabri/VisionAssistantPro",
