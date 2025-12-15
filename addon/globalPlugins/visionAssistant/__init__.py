@@ -21,6 +21,7 @@ import time
 import gc
 import tones
 import scriptHandler
+import markdown # Added standard library
 from urllib import request, error
 
 log = logging.getLogger(__name__)
@@ -80,51 +81,39 @@ def clean_markdown(text):
     text = re.sub(r'^\s*-\s+', '', text, flags=re.MULTILINE)
     return text.strip()
 
-def text_to_simple_html(text):
+def text_to_html(text, full_page=False):
     if not text: return ""
     
-    html = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-    
-    html = re.sub(r'```(.*?)```', r'<pre><code>\1</code></pre>', html, flags=re.DOTALL)
-    html = re.sub(r'`(.*?)`', r'<code>\1</code>', html)
-    
-    html = re.sub(r'\*\*(.*?)\*\*', r'<strong>\1</strong>', html)
-    html = re.sub(r'\*(.*?)\*', r'<em>\1</em>', html)
-    
-    html = re.sub(r'^### (.*)$', r'<h3>\1</h3>', html, flags=re.MULTILINE)
-    html = re.sub(r'^## (.*)$', r'<h2>\1</h2>', html, flags=re.MULTILINE)
-    html = re.sub(r'^# (.*)$', r'<h1>\1</h1>', html, flags=re.MULTILINE)
-    
-    html = re.sub(r'^\* (.*)$', r'<li>\1</li>', html, flags=re.MULTILINE)
-    html = re.sub(r'^- (.*)$', r'<li>\1</li>', html, flags=re.MULTILINE)
-    
-    lines = html.split('\n')
-    processed_lines = []
-    in_list = False
-    
-    for line in lines:
-        if line.strip().startswith('<li>'):
-            if not in_list:
-                processed_lines.append('<ul>')
-                in_list = True
-            processed_lines.append(line)
-        else:
-            if in_list:
-                processed_lines.append('</ul>')
-                in_list = False
-            
-            if not line.strip():
-                continue
-                
-            if not (line.startswith('<h') or line.startswith('<pre') or line.startswith('<ul') or line.startswith('<li')):
-                processed_lines.append(f'<p>{line}</p>')
-            else:
-                processed_lines.append(line)
-                
-    if in_list:
-        processed_lines.append('</ul>')
+    try:
+        html_body = markdown.markdown(text, extensions=['fenced_code', 'tables', 'nl2br'])
+    except:
+        html_body = markdown.markdown(text)
+        html_body = html_body.replace("\n", "<br>")
         
-    return "\n".join(processed_lines)
+    if not full_page:
+        return html_body
+
+    return f"""
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>{ADDON_NAME} Result</title>
+        <style>
+            body {{ font-family: "Segoe UI", Arial, sans-serif; line-height: 1.6; padding: 20px; color: #333; max-width: 800px; margin: 0 auto; }}
+            h1, h2, h3 {{ color: #2c3e50; border-bottom: 1px solid #eee; padding-bottom: 5px; }}
+            pre {{ background-color: #f4f4f4; padding: 10px; border-radius: 5px; overflow-x: auto; font-family: Consolas, monospace; }}
+            code {{ background-color: #f4f4f4; padding: 2px 5px; border-radius: 3px; font-family: Consolas, monospace; }}
+            strong {{ color: #000; }}
+            li {{ margin-bottom: 5px; }}
+        </style>
+    </head>
+    <body>
+        {html_body}
+    </body>
+    </html>
+    """
 
 def get_mime_type(path):
     ext = os.path.splitext(path)[1].lower()
@@ -305,8 +294,9 @@ class VisionQADialog(wx.Dialog):
         
         # Translators: Format for displaying AI message in a chat dialog
         display_text = clean_markdown(initial_text) if self.should_clean else initial_text
-        init_msg = _("AI: {text}\n").format(text=display_text)
-        self.outputArea.AppendText(init_msg)
+        if display_text:
+            init_msg = _("AI: {text}\n").format(text=display_text)
+            self.outputArea.AppendText(init_msg)
         
         if not (extra_info and extra_info.get('skip_init_history')):
              self.chat_history.append({"role": "model", "parts": [{"text": initial_text}]})
@@ -322,18 +312,26 @@ class VisionQADialog(wx.Dialog):
         # Translators: Button to send message in a chat dialog
         self.askBtn = wx.Button(self, label=_("Send"))
         
-        if self.raw_content:
-            # Translators: Button to save only the result content without chat history
-            self.saveContentBtn = wx.Button(self, label=_("Save Content"))
-            self.saveContentBtn.Bind(wx.EVT_BUTTON, self.onSaveContent)
-            btnSizer.Add(self.saveContentBtn, 0, wx.ALL, 5)
+        # Translators: Button to view the content in a formatted HTML window
+        self.viewBtn = wx.Button(self, label=_("View Formatted"))
+        self.viewBtn.Bind(wx.EVT_BUTTON, self.onView)
+        
+        # Translators: Button to save only the result content without chat history
+        self.saveContentBtn = wx.Button(self, label=_("Save Content"))
+        self.saveContentBtn.Bind(wx.EVT_BUTTON, self.onSaveContent)
 
         # Translators: Button to save chat in a chat dialog
         self.saveBtn = wx.Button(self, label=_("Save Chat"))
         # Translators: Button to close chat dialog
         self.closeBtn = wx.Button(self, wx.ID_CANCEL, label=_("Close"))
         
+        self.saveBtn.Enable(bool(initial_text.strip()))
+        self.viewBtn.Enable(bool(self.raw_content))
+        self.saveContentBtn.Enable(bool(self.raw_content))
+
         btnSizer.Add(self.askBtn, 0, wx.ALL, 5)
+        btnSizer.Add(self.viewBtn, 0, wx.ALL, 5)
+        btnSizer.Add(self.saveContentBtn, 0, wx.ALL, 5)
         btnSizer.Add(self.saveBtn, 0, wx.ALL, 5)
         btnSizer.Add(self.closeBtn, 0, wx.ALL, 5)
         mainSizer.Add(btnSizer, 0, wx.ALIGN_RIGHT)
@@ -344,7 +342,8 @@ class VisionQADialog(wx.Dialog):
         self.saveBtn.Bind(wx.EVT_BUTTON, self.onSave)
         self.inputArea.Bind(wx.EVT_TEXT_ENTER, self.onAsk)
         
-        wx.CallLater(300, ui.message, display_text)
+        if display_text:
+            wx.CallLater(300, ui.message, display_text)
 
     def onAsk(self, event):
         question = self.inputArea.Value
@@ -368,20 +367,61 @@ class VisionQADialog(wx.Dialog):
                  self.chat_history.append({"role": "model", "parts": [{"text": response_text}]})
             
             final_text = clean_markdown(response_text) if self.should_clean else response_text
-            wx.CallAfter(self.update_response, final_text)
+            wx.CallAfter(self.update_response, final_text, response_text)
 
-    def update_response(self, text):
+    def update_response(self, display_text, raw_text=None):
+        if raw_text:
+            self.raw_content = raw_text
+            self.viewBtn.Enable(True)
+            self.saveContentBtn.Enable(True)
+
         # Translators: Format for displaying AI message in a chat dialog
-        ai_msg = _("AI: {text}\n").format(text=text)
+        ai_msg = _("AI: {text}\n").format(text=display_text)
         self.outputArea.AppendText(ai_msg)
+        self.saveBtn.Enable(True)
+        
         self.outputArea.ShowPosition(self.outputArea.GetLastPosition())
-        ui.message(text)
+        ui.message(display_text)
 
     def report_save(self, msg):
         if self.status_callback:
             self.status_callback(msg)
         else:
             ui.message(msg)
+
+    def onView(self, event):
+        full_html = ""
+        
+        # Translators: Format for displaying User message in a chat dialog
+        user_label = _("\nYou: {text}\n").format(text="").strip()
+        # Translators: Format for displaying AI message in a chat dialog
+        ai_label = _("AI: {text}\n").format(text="").strip()
+        
+        if self.chat_history:
+            for item in self.chat_history:
+                role = item.get("role", "")
+                text = item.get("parts", [{}])[0].get("text", "")
+                
+                if role == "user":
+                    safe_text = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                    full_html += f"<h2>{user_label}</h2><p>{safe_text}</p>"
+                elif role == "model":
+                    formatted_text = text_to_html(text, full_page=False)
+                    full_html += f"<h2>{ai_label}</h2>{formatted_text}<hr>"
+        
+        if not full_html and self.raw_content:
+             formatted_text = text_to_html(self.raw_content, full_page=False)
+             full_html += f"<h2>{ai_label}</h2>{formatted_text}"
+
+        if not full_html: return
+
+        try:
+            # Translators: Title of the formatted result window
+            ui.browseableMessage(full_html, _("Formatted Conversation"), isHtml=True)
+        except Exception as e:
+            # Translators: Error message if viewing fails
+            msg = _("Error displaying content: {error}").format(error=e)
+            show_error_dialog(msg)
 
     def onSave(self, event):
         # Translators: Save dialog title
@@ -405,30 +445,9 @@ class VisionQADialog(wx.Dialog):
         if fd.ShowModal() == wx.ID_OK:
             path = fd.GetPath()
             try:
-                body_content = text_to_simple_html(self.raw_content)
-                html_template = f"""
-                <!DOCTYPE html>
-                <html lang="en">
-                <head>
-                    <meta charset="UTF-8">
-                    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-                    <title>{ADDON_NAME} Result</title>
-                    <style>
-                        body {{ font-family: "Segoe UI", Arial, sans-serif; line-height: 1.6; padding: 20px; color: #333; max-width: 800px; margin: 0 auto; }}
-                        h1, h2, h3 {{ color: #2c3e50; border-bottom: 1px solid #eee; padding-bottom: 5px; }}
-                        pre {{ background-color: #f4f4f4; padding: 10px; border-radius: 5px; overflow-x: auto; font-family: Consolas, monospace; }}
-                        code {{ background-color: #f4f4f4; padding: 2px 5px; border-radius: 3px; font-family: Consolas, monospace; }}
-                        strong {{ color: #000; }}
-                        li {{ margin-bottom: 5px; }}
-                    </style>
-                </head>
-                <body>
-                    {body_content}
-                </body>
-                </html>
-                """
+                full_html = text_to_html(self.raw_content, full_page=True)
                 with open(path, "w", encoding="utf-8") as f:
-                    f.write(html_template)
+                    f.write(full_html)
                 # Translators: Message on successful save
                 self.report_save(_("Saved."))
             except Exception as e:
@@ -765,14 +784,17 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
             else:
                 # Translators: Message of a dialog which may pop up while performing an AI call
                 msg = _("Server Error {code}: {reason}").format(code=e.code, reason=e.reason)
+            self.report_status(msg) # Added to reset status on error
             show_error_dialog(msg)
         except error.URLError as e:
             # Translators: Message of a dialog which may pop up while performing an AI call
             msg = _("Connection Error: {reason}").format(reason=e.reason)
+            self.report_status(msg) # Added to reset status on error
             show_error_dialog(msg)
         except Exception as e:
             # Translators: Message of a dialog which may pop up while performing an AI call
             msg = _("Error: {error}").format(error=e)
+            self.report_status(msg) # Added to reset status on error
             show_error_dialog(msg)
         return None
 
@@ -931,11 +953,6 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
             self.refine_menu_dlg.SetFocus()
             return
         
-        if self.refine_dlg:
-            self.refine_dlg.Raise()
-            self.refine_dlg.SetFocus()
-            return
-
         text = self._get_text_smart()
         if not text: text = "" 
         
@@ -1085,6 +1102,7 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
         res = self._call_gemini_safe(prompt_text, attachments=attachments)
         
         if res:
+             self.current_status = _("Idle") # Reset status on success
              wx.CallAfter(self._open_refine_result_dialog, res, attachments, text)
 
     def _open_refine_result_dialog(self, result_text, attachments, original_text):
@@ -1162,9 +1180,10 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
             
             res = self._call_gemini_safe("Extract all text from this file as plain text. Do not use JSON or bounding boxes.", attachments=att)
             if res:
+                self.current_status = _("Idle") # Reset status on success
                 wx.CallAfter(self._open_doc_chat_dialog, res, att, "", res)
         else:
-            pass
+            self.current_status = _("Idle") # Reset status on failure
 
     # Translators: Script description for Input Gestures dialog
     @scriptHandler.script(description=_("Allows asking questions about a selected document (PDF/Text/Image)."))
@@ -1190,9 +1209,10 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
             # Translators: Initial message in document chat when calling the file analysis command
             init_msg = _("Document ready. Ask your question.")
             
+            self.current_status = _("Idle") # Reset status on success
             wx.CallAfter(self._open_doc_chat_dialog, init_msg, att, "")
         else:
-            pass
+            self.current_status = _("Idle") # Reset status on failure
         
     def _open_doc_chat_dialog(self, init_msg, initial_attachments, doc_text, raw_text_for_save=None):
         if self.doc_dlg:
@@ -1261,7 +1281,10 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
         att = [{'mime_type': 'image/png', 'data': img}]
         res = self._call_gemini_safe(p, attachments=att)
         if res:
+            self.current_status = _("Idle") # Reset status on success
             wx.CallAfter(self._open_vision_dialog, res, att, None)
+        else:
+            self.current_status = _("Idle") # Reset status on failure
         
     def _open_vision_dialog(self, text, atts, size):
         if self.vision_dlg:
@@ -1318,7 +1341,9 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
             mime_type = get_mime_type(path)
             
             file_uri = self._upload_file_to_gemini(path, mime_type)
-            if not file_uri: return
+            if not file_uri: 
+                self.current_status = _("Idle") # Reset status on failure
+                return
 
             # Translators: Message reported when calling the audio transcription command
             msg = _("Analyzing...")
@@ -1331,11 +1356,15 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
             
             if res:
                 init_msg = res 
+                self.current_status = _("Idle") # Reset status on success
                 wx.CallAfter(self._open_doc_chat_dialog, init_msg, att, "", res)
+            else:
+                self.current_status = _("Idle") # Reset status on failure
         except: 
             # Translators: Generic error message when audio processing fails
             msg = _("Error processing audio.")
             wx.CallAfter(self.report_status, msg)
+            self.current_status = _("Idle") # Reset status on failure
 
     # Translators: Script description for Input Gestures dialog
     @scriptHandler.script(description=_("Attempts to solve a CAPTCHA on the screen or navigator object."))
@@ -1366,11 +1395,14 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
         else: p += " Convert to English digits."
         
         r = self._call_gemini_safe(p, attachments=[{'mime_type': 'image/png', 'data': d}])
-        if r: wx.CallAfter(self._finish_captcha, r)
+        if r: 
+            self.current_status = _("Idle") # Reset status on success
+            wx.CallAfter(self._finish_captcha, r)
         else: 
             # Translators: Message reported when calling the CAPTCHA solving command
             msg = _("Failed.")
             wx.CallAfter(self.report_status, msg)
+            self.current_status = _("Idle") # Reset status on failure
 
     def _finish_captcha(self, text):
         api.copyToClip(text)

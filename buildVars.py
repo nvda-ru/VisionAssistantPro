@@ -25,7 +25,8 @@ Features:
     # Brief changelog for this version
     # Translators: what's new content for the add-on version to be shown in the add-on store
     addon_changelog=_("""## Changes for 2.9
-*   **Added French translation.**
+*   **Added French and Turkish translations.**
+*   **Formatted View:** Added a "View Formatted" button to view chat with HTML styling.
 *   **Markdown Setting:** Added "Clean Markdown in Chat" option to view raw output.
 *   **Dialog Management:** Fixed focus issues and prevented duplicate windows.
 *   **UX Improvements:** Standardized file dialogs and removed redundant speech messages."""),
