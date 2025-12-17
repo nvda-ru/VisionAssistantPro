@@ -22,7 +22,7 @@ To ensure maximum compatibility with laptop layouts, all shortcuts use **NVDA + 
 | Shortcut                    | Function             | Description                                                                 |
 |-----------------------------|----------------------|-----------------------------------------------------------------------------|
 | NVDA+Ctrl+Shift+T           | Smart Translator     | Translates the text under the navigator cursor. Prioritizes selection.     |
-| NVDA+Ctrl+Shift+Y           | Clipboard Translator | Translates clipboard content. **Recommended for web browsers**.            |
+| NVDA+Ctrl+Shift+Y | Clipboard Translator | Translates clipboard content. |
 | NVDA+Ctrl+Shift+S           | Smart Dictation      | Converts speech to text. Press once to start, again to stop and type.       |
 | NVDA+Ctrl+Shift+R           | Text Refiner         | Summarize, Fix Grammar, Explain, or run **Custom Prompts**.                 |
 | NVDA+Ctrl+Shift+C           | CAPTCHA Solver       | Captures and solves CAPTCHA automatically.                                 |
@@ -58,8 +58,15 @@ Create commands in Settings: `Name:Prompt Text` (separate with `|` or new lines)
 - **Analyze Audio:** `Summarize Audio:Listen to this recording and summarize the main points. [file_audio]`
 - **Code Debugger:** `Debug:Find bugs in this code and explain them: [selection]`
 
-**Note:** File uploads limited to 15MB. Internet required. Multi-page TIFFs supported.
+**Note:** An active internet connection is required for all AI features. Multi-page TIFFs are automatically processed.
 
+## Changes for 3.0
+
+*   **New Languages:** Added **Persian** and **Vietnamese** translations.
+*   **Expanded AI Models:** Reorganized the model selection list with clear prefixes (`[Free]`, `[Pro]`, `[Auto]`) to help users distinguish between free and rate-limited (paid) models. Added support for **Gemini 3.0 Pro** and **Gemini 2.0 Flash Lite**.
+*   **Dictation Stability:** Significantly improved Smart Dictation stability. Added a safety check to ignore audio clips shorter than 1 second, preventing AI hallucinations and empty errors.
+*   **File Handling:** Fixed an issue where uploading files with non-English names would fail.
+*   **Prompt Optimization:** Improved Translation logic and structured Vision results.
 ## Changes for 2.9
 
 *   **Added French and Turkish translations.**

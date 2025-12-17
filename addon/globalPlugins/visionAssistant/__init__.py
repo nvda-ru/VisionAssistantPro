@@ -1,28 +1,46 @@
 # -*- coding: utf-8 -*-
 
-import addonHandler
-import globalPluginHandler
-import config
-import gui
-import wx
+import sys
+import os
 import json
 import threading
-import ui
-import api
 import logging
-import textInfos
-import os
 import base64
 import io
 import ctypes
 import re
 import tempfile
 import time
+import wave
 import gc
-import tones
-import scriptHandler
-import markdown # Added standard library
+from contextlib import contextmanager
 from urllib import request, error
+from urllib.parse import quote
+
+@contextmanager
+def scoped_import():
+    lib_dir = os.path.join(os.path.dirname(__file__), "lib")
+    sys.path.insert(0, lib_dir)
+    try:
+        yield
+    finally:
+        if lib_dir in sys.path:
+            sys.path.remove(lib_dir)
+
+with scoped_import():
+    import markdown
+
+import addonHandler
+import globalPluginHandler
+import config
+import gui
+import wx
+import ui
+import api
+import textInfos
+import tones
+import NVDAObjects.behaviors
+import scriptHandler
 
 log = logging.getLogger(__name__)
 addonHandler.initTranslation()
@@ -32,11 +50,25 @@ ADDON_NAME = addonHandler.getCodeAddon().manifest["summary"]
 # --- Configuration ---
 
 MODELS = [
-    "gemini-flash-lite-latest",
-    "gemini-flash-latest",
-    "gemini-2.5-flash-lite",
-    "gemini-2.5-flash",
-    "gemini-2.0-flash"
+    # --- 1. Recommended (Auto-Updating) ---
+    # Translators: AI Model info. [Auto] = Automatic updates. (Latest) = Newest version.
+    (_("[Auto]") + " Gemini Flash " + _("(Latest)"), "gemini-flash-latest"),
+    (_("[Auto]") + " Gemini Flash Lite " + _("(Latest)"), "gemini-flash-lite-latest"),
+
+    # --- 2. Current Standard (Free & Fast) ---
+    # Translators: AI Model info. [Free] = Generous usage limits.
+    (_("[Free]") + " Gemini 2.5 Flash", "gemini-2.5-flash"),
+    (_("[Free]") + " Gemini 2.5 Flash Lite", "gemini-2.5-flash-lite"),
+
+    # --- 3. High Intelligence (Paid/Pro/Preview) ---
+    # Translators: AI Model info. [Pro] = High intelligence/Paid. (Preview) = Experimental version.
+    (_("[Pro]") + " Gemini 3.0 Pro " + _("(Preview)"), "gemini-3-pro-preview"),
+    (_("[Pro]") + " Gemini 2.5 Pro", "gemini-2.5-pro"),
+
+    # --- 4. Legacy (Older Versions) ---
+    # Translators: AI Model info. [Legacy] = Older versions.
+    (_("[Legacy]") + " Gemini 2.0 Flash", "gemini-2.0-flash"),
+    (_("[Legacy]") + " Gemini 2.0 Flash Lite", "gemini-2.0-flash-lite"),
 ]
 
 BASE_LANGUAGES = [
@@ -57,7 +89,7 @@ TARGET_NAMES = [x[0] for x in TARGET_LIST]
 confspec = {
     "proxy_url": "string(default='')",
     "api_key": "string(default='')",
-    "model_name": "string(default='gemini-2.5-flash-lite')",
+    "model_name": "string(default='gemini-flash-lite-latest')",
     "target_language": "string(default='English')",
     "source_language": "string(default='Auto-detect')",
     "ai_response_language": "string(default='English')",
@@ -163,29 +195,24 @@ def process_tiff_pages(path):
     return pages_data
 
 PROMPT_TRANSLATE = """
-Role: Translation Logic Engine.
+Task: Translate the text below.
 
-Parameters:
-- Primary Target Language: "{target_lang}"
-- Auto-Swap Enabled: {smart_swap}
-- Fallback Language (Swap Target): "{swap_target}"
+Configuration:
+- Target Language: "{target_lang}"
+- Swap Language: "{swap_target}"
+- Smart Swap: {smart_swap}
+
+Rules:
+1. DEFAULT: Translate the input strictly to "{target_lang}".
+2. EXCEPTION: If (and ONLY if) the input is already completely in "{target_lang}" AND "Smart Swap" is True, then translate to "{swap_target}".
+
+Constraints:
+- Output ONLY the translation.
+- Do NOT explain your logic or add notes.
+- Do NOT translate technical terms, code, or protocol names.
 
 Input Text:
-===
 {text_content}
-===
-
-Algorithm:
-1. DETECT the language of the Input Text.
-2. DECIDE the output language based on these rules:
-   - IF (Auto-Swap is True) AND (Detected Language is {target_lang}):
-     -> Output Language = {swap_target}
-   - ELSE:
-     -> Output Language = {target_lang}
-
-3. EXECUTE translation:
-   - Translate the Input Text to the decided Output Language.
-   - Return ONLY the translation. No notes, no explanations.
 """
 
 PROMPT_UI_LOCATOR = "Analyze UI (Size: {width}x{height}). Request: '{query}'. Output JSON: {{\"x\": int, \"y\": int, \"found\": bool}}."
@@ -470,10 +497,17 @@ class SettingsPanel(gui.settingsDialogs.SettingsPanel):
         self.apiKey = cHelper.addLabeledControl(_("Gemini API Key:"), wx.TextCtrl)
         self.apiKey.Value = config.conf["VisionAssistant"]["api_key"]
         
+        model_display_names = [opt[0] for opt in MODELS]
+        
         # Translators: Label for Model selection
-        self.model = cHelper.addLabeledControl(_("AI Model:"), wx.Choice, choices=MODELS)
-        try: self.model.SetSelection(MODELS.index(config.conf["VisionAssistant"]["model_name"]))
-        except: self.model.SetSelection(0)
+        self.model = cHelper.addLabeledControl(_("AI Model:"), wx.Choice, choices=model_display_names)
+        
+        current_id = config.conf["VisionAssistant"]["model_name"]
+        try:
+            index = next(i for i, v in enumerate(MODELS) if v[1] == current_id)
+            self.model.SetSelection(index)
+        except StopIteration:
+            self.model.SetSelection(0)
 
         # Translators: Label for Proxy URL input
         self.proxyUrl = cHelper.addLabeledControl(_("Proxy URL:"), wx.TextCtrl)
@@ -556,7 +590,7 @@ class SettingsPanel(gui.settingsDialogs.SettingsPanel):
 
     def onSave(self):
         config.conf["VisionAssistant"]["api_key"] = self.apiKey.Value.strip()
-        config.conf["VisionAssistant"]["model_name"] = MODELS[self.model.GetSelection()]
+        config.conf["VisionAssistant"]["model_name"] = MODELS[self.model.GetSelection()][1]
         config.conf["VisionAssistant"]["proxy_url"] = self.proxyUrl.Value.strip()
         config.conf["VisionAssistant"]["source_language"] = SOURCE_NAMES[self.sourceLang.GetSelection()]
         config.conf["VisionAssistant"]["target_language"] = TARGET_NAMES[self.targetLang.GetSelection()]
@@ -651,11 +685,15 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
         
         try:
             file_size = os.path.getsize(file_path)
+            
+            filename = os.path.basename(file_path)
+            safe_filename = quote(filename)
+            
             headers = {
                 "X-Goog-Upload-Protocol": "raw",
                 "X-Goog-Upload-Command": "start, upload, finalize",
                 "X-Goog-Upload-Header-Content-Length": str(file_size),
-                "X-Goog-Upload-File-Name": os.path.basename(file_path),
+                "X-Goog-Upload-File-Name": safe_filename,
                 "Content-Type": mime_type
             }
             
@@ -833,6 +871,23 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
     def _thread_dictation(self):
         try:
             if not os.path.exists(self.temp_audio_file): return
+            
+            try:
+                with wave.open(self.temp_audio_file, "rb") as wave_file:
+                    frame_rate = wave_file.getframerate()
+                    n_frames = wave_file.getnframes()
+                    duration = n_frames / float(frame_rate)
+                
+                if duration < 1.0:
+                    # Translators: Message reported when the AI detects silence or empty speech
+                    msg = _("No speech detected.")
+                    wx.CallAfter(self.report_status, msg)
+                    try: os.remove(self.temp_audio_file)
+                    except: pass
+                    return
+            except Exception:
+                pass
+
             with open(self.temp_audio_file, "rb") as f:
                 audio_data = base64.b64encode(f.read()).decode('utf-8')
             
@@ -918,13 +973,34 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
         self.report_status(msg)
 
     def _get_text_smart(self):
-        try:
-            focus_obj = api.getFocusObject()
-            if focus_obj:
-                info = focus_obj.makeTextInfo(textInfos.POSITION_SELECTION)
+        focus_obj = api.getFocusObject()
+        if not focus_obj: return None
+
+        if hasattr(focus_obj, "treeInterceptor") and focus_obj.treeInterceptor:
+            try:
+                info = focus_obj.treeInterceptor.makeTextInfo(textInfos.POSITION_SELECTION)
                 if info and info.text and not info.text.isspace():
                     return info.text
+            except: pass
+
+        try:
+            info = focus_obj.makeTextInfo(textInfos.POSITION_SELECTION)
+            if info and info.text and not info.text.isspace():
+                return info.text
         except: pass
+
+        if isinstance(focus_obj, NVDAObjects.behaviors.EditableText):
+            try:
+                info = focus_obj.makeTextInfo(textInfos.POSITION_ALL)
+                if info and info.text and not info.text.isspace():
+                    return info.text
+            except: pass
+        
+        if isinstance(focus_obj, NVDAObjects.behaviors.Terminal):
+            try:
+                info = focus_obj.makeTextInfo(textInfos.POSITION_ALL)
+                return info.text
+            except: pass
 
         try:
             obj = api.getNavigatorObject()
@@ -937,7 +1013,9 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
             
             if hasattr(obj, 'makeTextInfo'):
                 try: 
-                    content.append(obj.makeTextInfo(textInfos.POSITION_ALL).text)
+                    ti = obj.makeTextInfo(textInfos.POSITION_ALL)
+                    if ti.text and len(ti.text) < 2000: 
+                        content.append(ti.text)
                 except: pass
                 
             final_text = " ".join(list(dict.fromkeys([c for c in content if c and not c.isspace()])))
@@ -978,7 +1056,8 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
                     name = parts[0].strip()
                     content = parts[1].strip()
                     if name and content:
-                        options.append((f"Custom: {name}", content))
+                        # Translators: Prefix for custom prompts in the Refine menu
+                        options.append((_("Custom: ") + name, content))
         
         display_choices = [opt[0] for opt in options]
         
@@ -998,7 +1077,7 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
             selection_index = self.refine_menu_dlg.GetSelection()
             custom_content = options[selection_index][1]
 
-            file_path = None
+            file_paths = []
             needs_file = False
             wc = "Files|*.*"
             
@@ -1013,24 +1092,33 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
                 wc = "Audio|*.mp3;*.wav;*.ogg"
             
             if needs_file:
-                file_path = self._browse_file(wc)
-                if file_path:
-                    wx.CallLater(200, lambda: threading.Thread(target=self._thread_refine, args=(text, custom_content, file_path), daemon=True).start())
+                # Translators: Standard title for opening a file
+                dlg = wx.FileDialog(gui.mainFrame, _("Open"), wildcard=wc, style=wx.FD_OPEN | wx.FD_FILE_MUST_EXIST | wx.FD_MULTIPLE)
+                if dlg.ShowModal() == wx.ID_OK:
+                    file_paths = dlg.GetPaths()
+                    file_paths.sort()
+                    wx.CallLater(200, lambda: threading.Thread(target=self._thread_refine, args=(text, custom_content, file_paths), daemon=True).start())
+                dlg.Destroy()
             else:
                 # Translators: Message while processing request of the refine text command
                 msg = _("Processing...")
                 self.report_status(msg)
-                threading.Thread(target=self._thread_refine, args=(text, custom_content, file_path), daemon=True).start()
+                threading.Thread(target=self._thread_refine, args=(text, custom_content, None), daemon=True).start()
         
         self.refine_menu_dlg.Destroy()
         self.refine_menu_dlg = None
 
-    def _thread_refine(self, text, custom_content, file_path=None):
+    def _thread_refine(self, text, custom_content, file_paths=None):
         target_lang = config.conf["VisionAssistant"]["target_language"]
         source_lang = config.conf["VisionAssistant"]["source_language"]
         smart_swap = config.conf["VisionAssistant"]["smart_swap"]
         resp_lang = config.conf["VisionAssistant"]["ai_response_language"]
         
+        if file_paths and isinstance(file_paths, str):
+            file_paths = [file_paths]
+        elif not file_paths:
+            file_paths = []
+
         prompt_text = custom_content
         attachments = []
         
@@ -1062,38 +1150,43 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
             if d: attachments.append({'mime_type': 'image/png', 'data': d})
             prompt_text = prompt_text.replace("[screen_full]", "")
             
-        if file_path:
-            try:
-                # Translators: Message reported when executing the refine command
-                msg = _("Uploading file...")
-                wx.CallAfter(self.report_status, msg)
-                mime_type = get_mime_type(file_path)
-                if "[file_ocr]" in prompt_text:
-                    file_uri = self._upload_file_to_gemini(file_path, mime_type)
-                    if file_uri:
-                         attachments.append({'mime_type': mime_type, 'file_uri': file_uri})
-                         prompt_text = prompt_text.replace("[file_ocr]", "")
-                         if not prompt_text.strip():
-                             prompt_text = "Extract all text from this file as plain text. Do not use JSON or bounding boxes."
-                
-                elif "[file_read]" in prompt_text:
-                    file_uri = self._upload_file_to_gemini(file_path, mime_type)
-                    if file_uri:
-                        attachments.append({'mime_type': mime_type, 'file_uri': file_uri})
-                        prompt_text = prompt_text.replace("[file_read]", "")
-                    else:
-                         with open(file_path, "rb") as f: raw = f.read()
-                         txt = raw.decode('utf-8')
-                         prompt_text = prompt_text.replace("[file_read]", f"\nFile Content:\n{txt}\n")
-                         
-                elif "[file_audio]" in prompt_text:
-                    file_uri = self._upload_file_to_gemini(file_path, mime_type)
-                    if file_uri:
-                        attachments.append({'mime_type': mime_type, 'file_uri': file_uri})
-                        prompt_text = prompt_text.replace("[file_audio]", "")
-            except: pass
+        if file_paths:
+            # Translators: Message reported when executing the refine command
+            msg = _("Uploading file...")
+            wx.CallAfter(self.report_status, msg)
             
-        if text and not used_selection and not file_path:
+            for f_path in file_paths:
+                try:
+                    mime_type = get_mime_type(f_path)
+                    
+                    if "[file_ocr]" in prompt_text:
+                        file_uri = self._upload_file_to_gemini(f_path, mime_type)
+                        if file_uri:
+                             attachments.append({'mime_type': mime_type, 'file_uri': file_uri})
+                    
+                    elif "[file_read]" in prompt_text:
+                        file_uri = self._upload_file_to_gemini(f_path, mime_type)
+                        if file_uri:
+                            attachments.append({'mime_type': mime_type, 'file_uri': file_uri})
+                        else:
+                             try:
+                                with open(f_path, "rb") as f: raw = f.read()
+                                txt = raw.decode('utf-8')
+                                prompt_text += f"\n\nFile Content ({os.path.basename(f_path)}):\n{txt}\n"
+                             except: pass
+
+                    elif "[file_audio]" in prompt_text:
+                        file_uri = self._upload_file_to_gemini(f_path, mime_type)
+                        if file_uri:
+                            attachments.append({'mime_type': mime_type, 'file_uri': file_uri})
+                except: pass
+
+            prompt_text = prompt_text.replace("[file_ocr]", "").replace("[file_read]", "").replace("[file_audio]", "")
+            
+            if not prompt_text.strip() and attachments:
+                 prompt_text = "Analyze these files."
+            
+        if text and not used_selection and not file_paths:
             prompt_text += f"\n\n---\nInput Text:\n{text}\n---\n"
             
         # Translators: Message reported when executing the refine command
@@ -1102,7 +1195,7 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
         res = self._call_gemini_safe(prompt_text, attachments=attachments)
         
         if res:
-             self.current_status = _("Idle") # Reset status on success
+             self.current_status = _("Idle")
              wx.CallAfter(self._open_refine_result_dialog, res, attachments, text)
 
     def _open_refine_result_dialog(self, result_text, attachments, original_text):
@@ -1163,27 +1256,41 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 
     def _open_file_ocr_dialog(self):
         wc = "Files|*.pdf;*.jpg;*.jpeg;*.png;*.webp;*.tif;*.tiff"
-        path = self._browse_file(wc)
-        if path:
-            threading.Thread(target=self._process_file_ocr, args=(path,), daemon=True).start()
+        # Translators: Standard title for opening a file
+        dlg = wx.FileDialog(gui.mainFrame, _("Open"), wildcard=wc, style=wx.FD_OPEN | wx.FD_FILE_MUST_EXIST | wx.FD_MULTIPLE)
+        if dlg.ShowModal() == wx.ID_OK:
+            paths = dlg.GetPaths()
+            paths.sort()
+            threading.Thread(target=self._process_file_ocr, args=(paths,), daemon=True).start()
+        dlg.Destroy()
 
-    def _process_file_ocr(self, path):
+    def _process_file_ocr(self, paths):
+        if isinstance(paths, str): paths = [paths]
+        
         # Translators: Message reported when calling the OCR file recognition command
         msg = _("Uploading & Extracting...")
         wx.CallAfter(self.report_status, msg)
-        mime_type = get_mime_type(path)
         
-        file_uri = self._upload_file_to_gemini(path, mime_type)
+        attachments = []
+        for path in paths:
+            try:
+                mime_type = get_mime_type(path)
+                file_uri = self._upload_file_to_gemini(path, mime_type)
+                if file_uri:
+                    attachments.append({'mime_type': mime_type, 'file_uri': file_uri})
+            except: pass
         
-        if file_uri:
-            att = [{'mime_type': mime_type, 'file_uri': file_uri}]
-            
-            res = self._call_gemini_safe("Extract all text from this file as plain text. Do not use JSON or bounding boxes.", attachments=att)
-            if res:
-                self.current_status = _("Idle") # Reset status on success
-                wx.CallAfter(self._open_doc_chat_dialog, res, att, "", res)
+        if not attachments:
+            self.current_status = _("Idle")
+            return
+
+        p = "Extract all visible text from these files. Preserve original formatting (headings, lists, tables) using Markdown. Output ONLY the extracted text, without any introductory or concluding remarks. Separate content of different files with '---'."
+        
+        res = self._call_gemini_safe(p, attachments=attachments)
+        if res:
+            wx.CallAfter(self._open_doc_chat_dialog, res, attachments, "", res)
         else:
-            self.current_status = _("Idle") # Reset status on failure
+            self.current_status = _("Idle")
 
     # Translators: Script description for Input Gestures dialog
     @scriptHandler.script(description=_("Allows asking questions about a selected document (PDF/Text/Image)."))
@@ -1216,18 +1323,28 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
         
     def _open_doc_chat_dialog(self, init_msg, initial_attachments, doc_text, raw_text_for_save=None):
         if self.doc_dlg:
-            try: self.doc_dlg.Destroy()
+            try: 
+                self.doc_dlg.Destroy()
             except: pass
+            self.doc_dlg = None
 
         def doc_callback(ctx_atts, q, history, dum2):
             lang = config.conf["VisionAssistant"]["ai_response_language"]
             atts = ctx_atts if ctx_atts else []
             
-            current_user_msg = {"role": "user", "parts": [{"text": f"{q} (STRICTLY Respond in {lang})"}]}
+            system_instr = (
+                f"STRICTLY Respond in {lang}. "
+                "Use Markdown formatting (bold, headings, lists). "
+                "Analyze both text and visual elements (images/charts) to answer the request."
+            )
+            
+            full_prompt = f"{q}\n\n[{system_instr}]"
+            
+            current_user_msg = {"role": "user", "parts": [{"text": full_prompt}]}
             
             messages = []
             if not history:
-                parts = [{"text": f"Analyze this file. {q} (Respond in {lang})"}]
+                parts = [{"text": f"Analyze this content. {full_prompt}"}]
                 for att in atts:
                     if 'file_uri' in att:
                         parts.append({"file_data": {"mime_type": att['mime_type'], "file_uri": att['file_uri']}})
@@ -1277,7 +1394,14 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 
     def _thread_vision(self, img, w, h):
         lang = config.conf["VisionAssistant"]["ai_response_language"]
-        p = f"Analyze this image and describe it. Language: {lang}. Ensure the response is strictly in {lang}."
+        
+        p = (
+            f"Analyze this image. Describe the layout, visible text, and UI elements. "
+            f"Use Markdown formatting (headings, lists) to organize the description. "
+            f"Language: {lang}. Ensure the response is strictly in {lang}. "
+            "IMPORTANT: Start directly with the description content. Do not add introductory sentences like 'Here is the analysis' or 'The image shows'."
+        )
+        
         att = [{'mime_type': 'image/png', 'data': img}]
         res = self._call_gemini_safe(p, attachments=att)
         if res:
