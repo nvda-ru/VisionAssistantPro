@@ -21,15 +21,14 @@ Features:
 - Audio Transcription (NVDA+Ctrl+Shift+A)
 - File Selection & OCR (NVDA+Ctrl+Shift+F)
 - Status Reporting (NVDA+Ctrl+Shift+I)"""),
-    addon_version="3.0.1",
+    addon_version="3.0.2",
     # Brief changelog for this version
     # Translators: what's new content for the add-on version to be shown in the add-on store
-    addon_changelog=_("""## Changes for 3.0
-*   **New Languages:** Added Persian and Vietnamese translations.
-*   **Expanded AI Models:** Reorganized models with [Free]/[Pro] prefixes and added Gemini 3.0.
-*   **Dictation Stability:** Improved silence detection and added audio duration checks.
-*   **File Handling:** Fixed uploads for files with non-English names.
-*   **Prompt Optimization:** Improved Translation logic and structured Vision results."""),
+    addon_changelog=_("""## Changes for 3.0.2
+*   **Batch OCR:** Added support for selecting and processing multiple images or PDF files simultaneously. The files are now processed in alphabetical order.
+*   **Compatibility Fix:** Bundled the `markdown` library within the add-on to resolve startup errors (ModuleNotFoundError) on NVDA 2024.3+ and ensure stability across all versions.
+*   **Code Safety:** Implemented a safer import mechanism to prevent conflicts with other add-ons or NVDA's internal libraries.
+*   **Translation:** Fixed an issue where the "Custom:" prefix in the Refine menu was not translatable."""),
     addon_author="Mahmood Hozhabri",
     addon_url="https://github.com/mahmoodhozhabri/VisionAssistantPro",
     addon_sourceURL="https://github.com/mahmoodhozhabri/VisionAssistantPro",
